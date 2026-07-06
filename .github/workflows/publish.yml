@@ -12,7 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write
+      id-token: write   # the OIDC proof for PyPI trusted publishing
+      contents: read    # declaring ANY permissions drops the defaults — checkout needs this back
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
