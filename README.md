@@ -1,5 +1,10 @@
 # bausatz
 
+[![tests](https://github.com/MatthiasDenecke/bausatz/actions/workflows/codecov.yml/badge.svg)](https://github.com/MatthiasDenecke/bausatz/actions/workflows/codecov.yml)
+[![codecov](https://codecov.io/gh/MatthiasDenecke/bausatz/branch/main/graph/badge.svg)](https://codecov.io/gh/MatthiasDenecke/bausatz)
+[![PyPI](https://img.shields.io/pypi/v/bausatz)](https://pypi.org/project/bausatz/)
+[![python](https://img.shields.io/pypi/pyversions/bausatz)](https://pypi.org/project/bausatz/)
+
 *German: “construction kit.”*
 
 **Config-driven component trees for Python** — pydantic-validated classes that self-register by a
