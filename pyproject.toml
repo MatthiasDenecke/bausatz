@@ -20,7 +20,7 @@ classifiers = [
 dependencies = ["pydantic>=2"]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "pytest-cov", "ruff"]
 
 [project.urls]
 Homepage = "https://github.com/MatthiasDenecke/bausatz"
