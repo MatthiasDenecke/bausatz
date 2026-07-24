@@ -1,71 +1,114 @@
-// A tiny C++ compute kernel exposed to Python with pybind11.
+// pybind11 bridge demonstrating two things at once:
 //
-// It stands in for "the C++ class you already have and want to drive from Python": a plain object
-// constructed from a few scalars, with a scalar method and a batched one. The pybind11 module at
-// the bottom is the entire bridge — no hand-written CPython boilerplate, no manual refcounting.
+//   1. A C++ abstract base `bausatz::Component` with a native composite. AffineKernel (a leaf) and
+//      Sequential (a container) both derive from it; Sequential holds its children by base pointer
+//      and runs the whole chain in C++ — no bounce back to Python between stages.
+//   2. Config-struct passing. AffineConfig mirrors the pydantic Config as a plain C++ struct; the
+//      Python side builds it from the validated config and hands this one typed object to the ctor.
 
 #include <pybind11/pybind11.h>
-#include <pybind11/stl.h>   // <-- automatic std::vector <-> list, std::optional <-> None, etc.
+#include <pybind11/stl.h>   // std::vector <-> list, etc.
 
+#include <cstddef>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "bausatz/component.hpp"
+
 namespace py = pybind11;
 
-// The "engine": y = scale * x + bias. Pure C++, knows nothing about Python or pydantic.
-class AffineKernel {
+// (2) Affine-specific config, mirrored as a plain C++ struct. The Python component fills this from
+// its validated pydantic config; the C++ side never sees pydantic.
+struct AffineConfig {
+    double scale = 1.0;
+    double bias = 0.0;
+};
+
+// A leaf engine: y = scale * x + bias. IS-A bausatz::Component.
+class AffineKernel : public bausatz::Component {
 public:
-    AffineKernel(double scale, double bias) : scale_(scale), bias_(bias) {
-        if (scale == 0.0) {
-            // Thrown from C++, surfaced in Python as ValueError (see the translation note below).
+    explicit AffineKernel(const AffineConfig &cfg) : cfg_(cfg) {
+        if (cfg.scale == 0.0) {
+            // Thrown from C++, surfaced in Python as ValueError (auto-translated by pybind11).
             throw std::invalid_argument("AffineKernel: scale must be non-zero");
         }
     }
 
-    double apply(double x) const { return scale_ * x + bias_; }
+    double forward(double x) const override { return cfg_.scale * x + cfg_.bias; }
 
-    // Batched path: takes a Python list (converted to std::vector by the stl.h caster), loops in
-    // pure C++, returns a vector (converted back to a list). See the GIL note on the binding.
-    std::vector<double> apply_many(const std::vector<double> &xs) const {
+    // Batched path: a Python list crosses via the stl.h caster, the loop runs in C++ with the GIL
+    // released (safe here — forward() is pure C++, no Python re-entry).
+    std::vector<double> forward_many(const std::vector<double> &xs) const {
         std::vector<double> out;
         out.reserve(xs.size());
-        for (double x : xs) out.push_back(scale_ * x + bias_);
+        for (double x : xs) out.push_back(forward(x));
         return out;
     }
 
-    double scale() const { return scale_; }
-    double bias() const { return bias_; }
+    const AffineConfig &config() const { return cfg_; }
 
 private:
-    double scale_;
-    double bias_;
+    AffineConfig cfg_;
+};
+
+// (1) A native composite: holds child components by base pointer and runs the chain entirely in C++.
+class Sequential : public bausatz::Component {
+public:
+    explicit Sequential(std::vector<std::shared_ptr<bausatz::Component>> stages)
+        : stages_(std::move(stages)) {}
+
+    double forward(double x) const override {
+        for (const auto &stage : stages_) x = stage->forward(x);
+        return x;
+    }
+
+    std::size_t size() const { return stages_.size(); }
+
+private:
+    std::vector<std::shared_ptr<bausatz::Component>> stages_;
 };
 
 PYBIND11_MODULE(_affine, m) {
-    m.doc() = "pybind11 bridge for AffineKernel — the native engine behind the Affine component";
+    m.doc() = "pybind11 bridge: a bausatz::Component ABC, a leaf kernel, and a native composite";
 
-    py::class_<AffineKernel>(m, "AffineKernel")
-        // Constructor: Python AffineKernel(scale=..., bias=...) -> C++ ctor. Keyword args + a
-        // default make it call cleanly from the component's _make_engine.
-        .def(py::init<double, double>(), py::arg("scale"), py::arg("bias") = 0.0)
-        .def("apply", &AffineKernel::apply, py::arg("x"),
-             "Apply the affine map to a single value.")
-        // py::call_guard releases the GIL for the duration of the C++ loop, so other Python threads
-        // keep running during a big batch. Arg/return conversion happens outside the guard, so this
-        // is safe. This is what makes a heavy C++ kernel a good citizen in threaded/async Python.
-        .def("apply_many", &AffineKernel::apply_many, py::arg("xs"),
-             py::call_guard<py::gil_scoped_release>(),
-             "Apply the affine map to a batch, looping in C++ with the GIL released.")
-        .def_property_readonly("scale", &AffineKernel::scale)
-        .def_property_readonly("bias", &AffineKernel::bias)
-        .def("__repr__", [](const AffineKernel &k) {
-            return "AffineKernel(scale=" + std::to_string(k.scale()) +
-                   ", bias=" + std::to_string(k.bias()) + ")";
+    // The abstract base. A shared_ptr holder lets a C++ parent (Sequential) and the Python wrapper
+    // share ownership of the same engine. No __init__ — it is abstract; `forward` dispatches
+    // virtually, so it works on any derived instance.
+    py::class_<bausatz::Component, std::shared_ptr<bausatz::Component>>(m, "Component")
+        .def("forward", &bausatz::Component::forward, py::arg("x"),
+             "Run the component's compute on a single value.");
+
+    // The mirrored config struct (Q2 option 2): a typed C++ config built on the Python side.
+    py::class_<AffineConfig>(m, "AffineConfig")
+        .def(py::init<double, double>(), py::arg("scale") = 1.0, py::arg("bias") = 0.0)
+        .def_readwrite("scale", &AffineConfig::scale)
+        .def_readwrite("bias", &AffineConfig::bias)
+        .def("__repr__", [](const AffineConfig &c) {
+            return "AffineConfig(scale=" + std::to_string(c.scale) +
+                   ", bias=" + std::to_string(c.bias) + ")";
         });
 
-    // C++ exceptions are auto-translated: std::invalid_argument -> Python ValueError,
-    // std::out_of_range -> IndexError, std::runtime_error -> RuntimeError, etc. So a bad-argument
-    // failure from the kernel surfaces as an ordinary Python exception. Use py::register_exception
-    // to map a custom C++ exception type to a custom Python one.
+    // Derived types declare the base AND the shared_ptr holder so instances upcast to
+    // shared_ptr<bausatz::Component> when handed to Sequential.
+    py::class_<AffineKernel, bausatz::Component, std::shared_ptr<AffineKernel>>(m, "AffineKernel")
+        .def(py::init<const AffineConfig &>(), py::arg("config"))
+        .def("forward_many", &AffineKernel::forward_many, py::arg("xs"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Apply to a batch, looping in C++ with the GIL released.")
+        .def_property_readonly("scale", [](const AffineKernel &k) { return k.config().scale; })
+        .def_property_readonly("bias", [](const AffineKernel &k) { return k.config().bias; })
+        .def("__repr__", [](const AffineKernel &k) {
+            return "AffineKernel(scale=" + std::to_string(k.config().scale) +
+                   ", bias=" + std::to_string(k.config().bias) + ")";
+        });
+
+    py::class_<Sequential, bausatz::Component, std::shared_ptr<Sequential>>(m, "Sequential")
+        // Python list[Component] -> std::vector<std::shared_ptr<bausatz::Component>> via stl.h.
+        .def(py::init<std::vector<std::shared_ptr<bausatz::Component>>>(), py::arg("stages"))
+        .def_property_readonly("size", &Sequential::size)
+        .def("__repr__", [](const Sequential &s) {
+            return "Sequential(size=" + std::to_string(s.size()) + ")";
+        });
 }

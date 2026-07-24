@@ -15,6 +15,7 @@ ext_modules = [
     Pybind11Extension(
         "bausatz_affine._affine",   # -> bausatz_affine/_affine*.so
         ["src/affine.cpp"],
+        include_dirs=["include"],   # bausatz/component.hpp (the C++ Component ABC)
         cxx_std=17,
     ),
 ]
