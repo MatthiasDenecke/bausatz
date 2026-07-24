@@ -5,8 +5,8 @@ turns a spec into an instance; ``Registry`` is the tag -> class table. See ``com
 registration mechanics.
 """
 
-from bausatz.registry import Registry
 from bausatz.component import Component
 from bausatz.component_factory import ComponentFactory
+from bausatz.registry import Registry
 
 __all__ = ["Component", "ComponentFactory", "Registry"]

@@ -26,10 +26,10 @@ class Dense(Retriever):                          # a concrete member, registered
 class Pipeline(Component):                       # a container builds its children through the factory
     class Config(Component.Config):
         class_name: Literal["pipeline"] = "pipeline"
-        retrievers: list[dict]
+        retrievers: list[Retriever.Config]       # child specs -> concrete Configs, validated eagerly
 
     def _build_children(self, factory: ComponentFactory) -> None:
-        self.retrievers = [factory.create_as(spec, Retriever) for spec in self.config.retrievers]
+        self.retrievers = [factory.build(cfg) for cfg in self.config.retrievers]
 
 pipeline = ComponentFactory.get().create(
     {"class_name": "pipeline", "retrievers": [{"class_name": "dense", "top_k": 20}]}
@@ -37,16 +37,20 @@ pipeline = ComponentFactory.get().create(
 ```
 
 A whole system becomes a spec: swap implementations by editing config, not code. Unknown keys are
-rejected, fields are validated, and `to_json()` round-trips every component back to the spec that
-built it.
+rejected and fields are validated — for the whole tree in one pass, since a child field typed as a
+`Config` (here `list[Retriever.Config]`) resolves and validates its nested specs during the parent's
+validation, and rejects a child from another family — and `to_dict()` round-trips every component
+back to the spec that built it.
 
 ## The pieces
 
 | piece | job |
 |---|---|
 | `Component` | base for buildable classes — declares a typed nested `Config` (pydantic) and self-registers at class-definition time by its `class_name` tag |
-| `ComponentFactory` | turns a spec dict into an instance (`create` / typed `create_as` / `create_many`), recursing into container children; `config_adapter()` builds a pydantic **discriminated union** over every registered Config for one-pass validation of whole trees |
+| `ComponentFactory` | `validate(spec)` → a typed `Config` (children resolved), `build(config)` → the instance, and `create = build∘validate` (plus typed `create_as` / `build_as` and `create_many`), recursing into container children; `config_adapter()` builds a pydantic **discriminated union** over every registered Config for one-pass validation of whole trees |
 | `Registry` | the tag → class table; duplicate tags fail loudly |
+
+A container's child fields are typed as a `Config` (`list[Retriever.Config]`, `dict[str, Component.Config]`, an optional one, …); `Component.Config` resolves each nested spec into its concrete Config eagerly, in the parent's validation pass — no dedicated child-field type to import.
 
 ## Scoped registries
 
@@ -66,8 +70,12 @@ class MyBase(Component, factory=my_factory):     # the whole subtree registers i
 
 - **The tag lives on the Config** (`class_name: Literal["dense"] = "dense"`), so it serializes with
   the config and validates like any other field.
-- **Containers own their children**: `_build_children(factory)` builds nested components through
-  the *same* factory, so a whole tree assembles against one registry in one recursive pass.
+- **Children are typed, not `dict`**: typing them as a `Config` validates the whole config tree in
+  one eager pass (a malformed grandchild fails `validate`, not later at build time), keeps the config
+  self-describing, and — with a family base like `list[Retriever.Config]` — rejects a foreign child.
+- **Containers own their children**: `_build_children(factory)` turns the child Configs into
+  components through the *same* factory, so a whole tree assembles against one registry in one
+  recursive pass.
 - **Import = register**: a component must be imported before a spec can name it (package
   `__init__`s that import their members are the idiomatic registration point).
 - Zero dependencies beyond **pydantic v2**. Python ≥ 3.12. Fully typed (`py.typed`).
