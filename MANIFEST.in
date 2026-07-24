@@ -1,0 +1,5 @@
+# Ship the C++ headers in the sdist explicitly. Current setuptools already pulls them in via
+# [tool.setuptools.package-data], but stating it here guarantees it independent of setuptools
+# version — and `python -m build` builds the wheel *from* the sdist, so a header missing here would
+# also be missing from the published wheel. See bausatz.get_include().
+recursive-include src/bausatz/include *.hpp
