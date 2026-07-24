@@ -14,7 +14,7 @@ from typing import Literal
 import pytest
 from pydantic import Field, ValidationError
 
-from bausatz import ChildConfig, Component, ComponentFactory, Registry
+from bausatz import Component, ComponentFactory, Registry
 from bausatz.registry import DuplicateTagError, UnknownTagError
 
 
@@ -48,7 +48,7 @@ class Dropout(Component):
 class Sequential(Component):
     class Config(Component.Config):
         class_name: Literal["sequential"] = "sequential"
-        layers: list[ChildConfig]  # child specs, each resolved to its concrete Config eagerly
+        layers: list[Component.Config]  # child specs, each resolved to its concrete Config eagerly
 
     config: Sequential.Config
 
@@ -63,6 +63,53 @@ class Sequential(Component):
         for layer in self.layers:
             x = layer.forward(x)
         return x
+
+
+# A small family, scoped to its own factory, used to show that typing children as a family base
+# (`list[_Retriever.Config]`) makes the resolver reject a child from another family. Defined at
+# module scope so the forward reference resolves under `from __future__ import annotations`.
+_family = ComponentFactory(Registry())
+
+
+class _Retriever(Component, factory=_family):
+    class Config(Component.Config):
+        pass
+
+
+class _Dense(_Retriever):
+    class Config(_Retriever.Config):
+        class_name: Literal["dense"] = "dense"
+
+
+class _Pool(Component, factory=_family):  # deliberately NOT a _Retriever
+    class Config(Component.Config):
+        class_name: Literal["pool"] = "pool"
+
+
+class _Ensemble(Component, factory=_family):
+    class Config(Component.Config):
+        class_name: Literal["ensemble"] = "ensemble"
+        members: list[_Retriever.Config]
+
+
+class Router(Component):
+    """A container exercising the dict-shaped and optional child field types."""
+
+    class Config(Component.Config):
+        class_name: Literal["router"] = "router"
+        routes: dict[str, Component.Config]         # dict-shaped children
+        fallback: Component.Config | None = None    # optional child
+
+    config: Router.Config
+
+    def __init__(self, config: Router.Config) -> None:
+        super().__init__(config)
+        self.routes: dict[str, Component] = {}
+        self.fallback: Component | None = None
+
+    def _build_children(self, factory: ComponentFactory) -> None:
+        self.routes = {k: factory.build(v) for k, v in self.config.routes.items()}
+        self.fallback = factory.build(self.config.fallback) if self.config.fallback else None
 
 
 @pytest.fixture
@@ -276,6 +323,47 @@ def test_children_validate_to_concrete_configs(factory):
     assert cfg.layers[0].out_features == 2
 
 
+def test_family_typed_children_reject_a_foreign_child():
+    # Typing children as a family base (list[_Retriever.Config]) makes the resolver enforce the
+    # family: a member resolves, a component from another family is rejected at validation.
+    ok = _family.validate({"class_name": "ensemble", "members": [{"class_name": "dense"}]})
+    assert isinstance(ok.members[0], _Dense.Config)
+    with pytest.raises(ValidationError):
+        _family.validate({"class_name": "ensemble", "members": [{"class_name": "pool"}]})
+
+
+def test_dict_and_optional_children_resolve(factory):
+    factory.register("router", Router)
+    cfg = factory.validate(
+        {
+            "class_name": "router",
+            "routes": {
+                "a": {"class_name": "linear", "in_features": 2, "out_features": 1},
+                "b": {"class_name": "dropout", "p": 0.2},
+            },
+            "fallback": {"class_name": "dropout", "p": 0.0},
+        }
+    )
+    assert isinstance(cfg.routes["a"], Linear.Config)
+    assert isinstance(cfg.routes["b"], Dropout.Config)
+    assert isinstance(cfg.fallback, Dropout.Config)
+
+    router = factory.build(cfg)
+    assert isinstance(router.routes["a"], Linear) and router.fallback is not None
+    assert factory.create(router.to_dict()).config == router.config  # dict/optional round-trip
+
+    # An omitted optional child stays None.
+    assert factory.validate({"class_name": "router", "routes": {}}).fallback is None
+
+
+def test_wrong_container_type_for_children_is_rejected(factory):
+    # layers is list-shaped; handing it a dict is left for field validation to reject.
+    with pytest.raises(ValidationError):
+        factory.validate(
+            {"class_name": "sequential", "layers": {"x": {"class_name": "dropout", "p": 0.1}}}
+        )
+
+
 def test_validate_rejects_malformed_child_eagerly(factory):
     # A bad grandchild is caught at validate() time, not deferred to build time.
     with pytest.raises(ValidationError):
@@ -453,7 +541,7 @@ def test_scoped_container_builds_children_from_its_own_factory():
     class SBox(SBase):
         class Config(SBase.Config):
             class_name: Literal["scoped-box"] = "scoped-box"
-            child: ChildConfig
+            child: SBase.Config  # a family-base type: the resolver rejects a non-SBase child
 
         def _build_children(self, factory: ComponentFactory) -> None:
             self.child = factory.build(self.config.child)

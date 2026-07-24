@@ -17,27 +17,31 @@ SCOPED factory: ``class MyBase(Component, factory=my_factory)`` scopes the whole
 only need to be unique per library. Either way a component must be IMPORTED before the factory can
 build it from a spec.
 
-Container components declare their children with ``ChildConfig`` rather than a raw ``dict``:
+Container components declare their children with the natural ``Config`` type — no special field
+type — and ``Component.Config`` resolves each child spec into its concrete ``Config`` subclass
+during the parent's own validation:
 
     class Sequential(Component):
         class Config(Component.Config):
             class_name: Literal["sequential"] = "sequential"
-            layers: list[ChildConfig]   # each element validates into its concrete Config
+            layers: list[Component.Config]      # or a family base, e.g. list[Retriever.Config]
 
         def _build_children(self, factory):
             self.layers = [factory.build(cfg) for cfg in self.config.layers]
 
-``ChildConfig`` resolves each child spec into its concrete ``Config`` subclass *eagerly*, during
-the parent's validation, so a malformed grandchild is caught by ``factory.validate`` — not deferred
-to build time — and the whole config tree is typed rather than a bag of dicts.
+So ``factory.validate`` validates a whole tree in one pass — a malformed grandchild fails there,
+not later at build time — and the config stays typed rather than a bag of dicts. Typing children as
+a family base (``list[Retriever.Config]``) additionally makes the resolver reject a child from a
+different family.
 """
 
 from __future__ import annotations
 
+import types
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Union, get_args, get_origin
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, SerializeAsAny, ValidationInfo
+from pydantic import BaseModel, ConfigDict, ValidationInfo, model_validator
 from pydantic_core import PydanticUndefined
 
 if TYPE_CHECKING:
@@ -58,6 +62,29 @@ class Component:
         #     class_name: Literal["linear"] = "linear"
 
         model_config = ConfigDict(extra="forbid")  # reject unknown keys; inherited by subclasses
+
+        @model_validator(mode="before")
+        @classmethod
+        def _resolve_children(cls, data: Any, info: ValidationInfo) -> Any:
+            """Turn nested child specs into their concrete Configs, in the parent's validation pass.
+
+            A field whose declared type is a ``Component.Config`` (or subclass) — directly or inside
+            a ``list``/``dict`` — accepts a plain spec dict; here each such dict is looked up by its
+            ``class_name`` in the registry (from the validation context's factory, else the global
+            one) and replaced with the concrete Config. That is what lets ``factory.validate``
+            validate a whole tree in one pass and keeps the tree typed, with no dedicated
+            child-field type. An already-resolved Config, or a value that is not a spec, passes
+            through untouched."""
+            if not isinstance(data, Mapping):
+                return data
+            child_fields = _child_config_fields(cls)
+            if not child_fields:
+                return data
+            patched = dict(data)
+            for field_name, shape in child_fields.items():
+                if field_name in patched:
+                    patched[field_name] = _resolve_child(patched[field_name], shape, info)
+            return patched
 
     # Narrowed in subclasses (`config: Linear.Config`) purely for type checkers.
     config: Component.Config
@@ -95,8 +122,8 @@ class Component:
 
         Override to construct nested components from ``self.config`` using the SAME
         factory, so the whole tree is built against one registry. Children arrive as
-        already-validated ``Config`` objects (see ``ChildConfig``), so pass them to
-        ``factory.build`` — no re-validation:
+        already-validated ``Config`` objects, so pass them to ``factory.build`` — no
+        re-validation:
 
             def _build_children(self, factory):
                 self.children = [factory.build(cfg) for cfg in self.config.children]
@@ -132,30 +159,70 @@ class Component:
         self._children_built = True  # commit only after a successful build
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize back to the dict shape that ``ComponentFactory.create`` consumes."""
-        return self.config.model_dump()
+        """Serialize back to the dict shape that ``ComponentFactory.create`` consumes.
+
+        ``serialize_as_any`` makes nested child Configs (declared as a ``Component.Config`` base but
+        holding a concrete subclass) emit their subclass fields, so the whole tree round-trips."""
+        return self.config.model_dump(serialize_as_any=True)
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.config!r})"
 
 
 # --------------------------------------------------------------------------- #
-# ChildConfig: a nested child spec, resolved to its concrete Config eagerly.
+# Child-config resolution: which fields hold child specs, and how to resolve.
 # --------------------------------------------------------------------------- #
-def _resolve_child_config(value: Any, info: ValidationInfo) -> Any:
-    """Turn a child spec ``{"class_name": ..., ...}`` into its concrete ``Config`` subclass.
+# Per-config cache of {field_name: "one" | "list" | "dict"} for fields that hold child Configs.
+_CHILD_FIELDS: dict[type, dict[str, str]] = {}
 
-    Runs during the *parent's* validation, so the whole tree is validated in one pass. The registry
-    is taken from the validation context (``model_validate(spec, context={"factory": f})``, which
-    ``ComponentFactory.validate``/``create`` seed with themselves) so a scoped factory resolves its
-    own tags; absent a context it falls back to the process-global factory. An already-resolved
-    ``Config`` instance passes straight through."""
-    if isinstance(value, Component.Config):
+
+def _is_config_type(tp: Any) -> bool:
+    return isinstance(tp, type) and issubclass(tp, Component.Config)
+
+
+def _classify_child_field(annotation: Any) -> str | None:
+    """Return how a field holds child Configs — ``"one"`` / ``"list"`` / ``"dict"`` — or ``None``.
+
+    Understands a bare ``Component.Config`` (subclass), ``list[...]``/``set``/``tuple`` and
+    ``dict[K, ...]`` of them, and those wrapped in ``Optional`` / ``X | None``."""
+    origin = get_origin(annotation)
+    if origin is None:
+        return "one" if _is_config_type(annotation) else None
+    if origin is Union or origin is types.UnionType:
+        for arg in get_args(annotation):
+            if arg is type(None):
+                continue
+            shape = _classify_child_field(arg)
+            if shape:
+                return shape
+        return None
+    if origin in (list, set, frozenset, tuple):
+        args = get_args(annotation)
+        return "list" if args and _is_config_type(args[0]) else None
+    if origin is dict:
+        args = get_args(annotation)
+        return "dict" if len(args) == 2 and _is_config_type(args[1]) else None
+    return None
+
+
+def _child_config_fields(config_cls: type) -> dict[str, str]:
+    cached = _CHILD_FIELDS.get(config_cls)
+    if cached is None:
+        cached = {
+            name: shape
+            for name, field in config_cls.model_fields.items()
+            if (shape := _classify_child_field(field.annotation)) is not None
+        }
+        _CHILD_FIELDS[config_cls] = cached
+    return cached
+
+
+def _resolve_one(value: Any, info: ValidationInfo) -> Any:
+    """Resolve a single child spec dict into its concrete Config; pass anything else through."""
+    if isinstance(value, Component.Config) or not isinstance(value, Mapping):
         return value
-    if not isinstance(value, Mapping) or Component.DISCRIMINATOR not in value:
-        raise ValueError(
-            f"child spec must be a mapping with a {Component.DISCRIMINATOR!r} key: {value!r}"
-        )
+    if Component.DISCRIMINATOR not in value:
+        return value  # let the field's own validation raise against the missing discriminator
     from bausatz.component_factory import ComponentFactory
 
     context = info.context or {}
@@ -165,8 +232,11 @@ def _resolve_child_config(value: Any, info: ValidationInfo) -> Any:
     return klass.Config.model_validate(dict(value), context=info.context)
 
 
-# A container field type: ``layers: list[ChildConfig]`` / ``child: ChildConfig``. ``SerializeAsAny``
-# makes ``model_dump`` emit the concrete subclass's fields (not just the ``Component.Config`` base),
-# so ``to_dict`` round-trips the full tree; ``BeforeValidator`` does the dict -> concrete-Config
-# resolution above.
-ChildConfig = Annotated[SerializeAsAny[Component.Config], BeforeValidator(_resolve_child_config)]
+def _resolve_child(value: Any, shape: str, info: ValidationInfo) -> Any:
+    if shape == "list" and isinstance(value, (list, tuple, set, frozenset)):
+        return [_resolve_one(v, info) for v in value]
+    if shape == "dict" and isinstance(value, Mapping):
+        return {k: _resolve_one(v, info) for k, v in value.items()}
+    if shape == "one":
+        return _resolve_one(value, info)
+    return value  # wrong container type for the shape: let field validation report it

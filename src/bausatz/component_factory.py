@@ -11,7 +11,7 @@ The framework is three small modules, each with one job:
 A ``ComponentFactory`` holds a ``Registry`` and is also reachable as a process-global singleton
 via ``ComponentFactory.get()`` — which is where ``Component`` subclasses self-register on import.
 ``Component`` only references ``ComponentFactory`` inside a ``TYPE_CHECKING`` annotation (plus a
-lazy import in ``__init_subclass__`` / ``ensure_built`` / the ``ChildConfig`` resolver), which
+lazy import in ``__init_subclass__`` / ``ensure_built`` / the child-config resolver), which
 avoids the import cycle between the two modules.
 
 Construction is two steps, exposed separately:
@@ -25,12 +25,14 @@ config tree up front (e.g. to surface errors) without constructing anything.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Annotated, Any, TypeVar, Union
+from functools import reduce
+from operator import or_
+from typing import Annotated, Any, TypeVar
 
 from pydantic import Field, TypeAdapter
 
-from .registry import Registry
 from .component import Component
+from .registry import Registry
 
 _C = TypeVar("_C", bound=Component)
 
@@ -53,9 +55,9 @@ class ComponentFactory:
         """
         Validate a spec into its Config without constructing the Component.
 
-        Validation is recursive: any ``ChildConfig`` fields resolve their child specs into concrete
-        Configs in the same pass, against THIS factory (seeded via the validation context), so
-        scoped registries resolve their own tags.
+        Validation is recursive: any child-config fields (children typed as a ``Config``) resolve
+        their child specs into concrete Configs in the same pass, against THIS factory (seeded via
+        the validation context), so scoped registries resolve their own tags.
         """
         if not isinstance(spec, Mapping) or Component.DISCRIMINATOR not in spec:
             raise ValueError(
@@ -122,7 +124,7 @@ class ComponentFactory:
         if len(configs) == 1:
             adapter: TypeAdapter[Any] = TypeAdapter(configs[0])
         else:
-            union = Union[tuple(configs)]  # type: ignore[valid-type]
+            union = reduce(or_, configs)  # ConfigA | ConfigB | ... (a discriminated union below)
             adapter = TypeAdapter(Annotated[union, Field(discriminator=Component.DISCRIMINATOR)])
         self._adapter_cache = (version, adapter)
         return adapter
