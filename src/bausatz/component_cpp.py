@@ -32,6 +32,7 @@ to the engine. Subclasses implement ``_make_engine`` to construct the native obj
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from typing import Any
 
 from bausatz.component import Component
@@ -39,8 +40,12 @@ from bausatz.component import Component
 _UNSET: Any = object()  # a private sentinel, distinct from a legitimate ``None`` engine
 
 
-class CppComponent(Component):
+class CppComponent(Component, ABC):
     """A ``Component`` whose behavior is provided by a native engine object.
+
+    Abstract: a subclass must implement ``_make_engine``, so forgetting to fails at construction —
+    not later, at first ``engine`` access. (Unlike ``Component``, whose only "abstract" contract is
+    a pinned ``class_name``, this base has a genuine abstract method, so ``ABC`` earns its place.)
 
     The engine is built once, lazily, from the validated config and cached — so a ``CppComponent``
     is usable whether it was assembled by the factory or constructed directly, with no separate
@@ -55,12 +60,9 @@ class CppComponent(Component):
         super().__init__(config)
         self._engine: Any = _UNSET  # built on first ``engine`` access
 
+    @abstractmethod
     def _make_engine(self) -> Any:
-        """Construct and return the native engine from ``self.config``. Override in subclasses."""
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement _make_engine() to construct its native engine "
-            f"from self.config"
-        )
+        """Construct and return the native engine from ``self.config``. Implement in subclasses."""
 
     @property
     def engine(self) -> Any:

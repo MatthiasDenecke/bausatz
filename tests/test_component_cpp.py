@@ -75,10 +75,12 @@ def test_config_still_validates_and_round_trips(factory):
     assert factory.create(comp.to_dict()).forward(1.0) == comp.forward(1.0)
 
 
-def test_missing_make_engine_raises_helpfully():
+def test_missing_make_engine_is_uninstantiable():
+    # CppComponent is abstract: a subclass that forgets _make_engine can't be constructed at all,
+    # so the mistake surfaces immediately rather than at first engine access.
     class NoEngine(CppComponent):
         class Config(Component.Config):
             class_name: Literal["no-engine"] = "no-engine"
 
-    with pytest.raises(NotImplementedError, match="_make_engine"):
-        _ = NoEngine(NoEngine.Config()).engine
+    with pytest.raises(TypeError, match="_make_engine"):
+        NoEngine(NoEngine.Config())
