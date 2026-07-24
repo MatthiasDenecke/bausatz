@@ -16,14 +16,28 @@ like any other field. Registration happens at class-definition time into the pro
 SCOPED factory: ``class MyBase(Component, factory=my_factory)`` scopes the whole subtree, so tags
 only need to be unique per library. Either way a component must be IMPORTED before the factory can
 build it from a spec.
+
+Container components declare their children with ``ChildConfig`` rather than a raw ``dict``:
+
+    class Sequential(Component):
+        class Config(Component.Config):
+            class_name: Literal["sequential"] = "sequential"
+            layers: list[ChildConfig]   # each element validates into its concrete Config
+
+        def _build_children(self, factory):
+            self.layers = [factory.build(cfg) for cfg in self.config.layers]
+
+``ChildConfig`` resolves each child spec into its concrete ``Config`` subclass *eagerly*, during
+the parent's validation, so a malformed grandchild is caught by ``factory.validate`` — not deferred
+to build time — and the whole config tree is typed rather than a bag of dicts.
 """
 
 from __future__ import annotations
 
-from abc import ABC
-from typing import TYPE_CHECKING, Any, ClassVar
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, BeforeValidator, ConfigDict, SerializeAsAny, ValidationInfo
 from pydantic_core import PydanticUndefined
 
 if TYPE_CHECKING:
@@ -32,7 +46,11 @@ if TYPE_CHECKING:
 # --------------------------------------------------------------------------- #
 # Component: base for config-driven classes.
 # --------------------------------------------------------------------------- #
-class Component(ABC):
+class Component:
+
+    # The field every Config carries and the factory dispatches on. Defined once here and referenced
+    # (never re-spelled as a literal) by the factory and the discriminated-union adapter.
+    DISCRIMINATOR: ClassVar[str] = "class_name"
 
     class Config(BaseModel):
         name: str | None = None                     # shared field for every layer
@@ -55,48 +73,100 @@ class Component(ABC):
         super().__init_subclass__(**kwargs)
         if factory is not None:
             cls._factory = factory  # inherited by the subtree (a deeper subclass may re-scope)
-        field = cls.Config.model_fields.get("class_name")
+        field = cls.Config.model_fields.get(cls.DISCRIMINATOR)
         if field is None:
             return  # no discriminator pinned -> abstract base, not registered
         if field.default is PydanticUndefined:
             tag = cls.__name__.lower()
             raise TypeError(
-                f"{cls.__qualname__}.Config.class_name needs a default, e.g. "
-                f'class_name: Literal["{tag}"] = "{tag}"'
+                f"{cls.__qualname__}.Config.{cls.DISCRIMINATOR} needs a default, e.g. "
+                f'{cls.DISCRIMINATOR}: Literal["{tag}"] = "{tag}"'
             )
         (cls._factory or ComponentFactory.get()).register(field.default, cls)
 
     def __init__(self, config: Component.Config) -> None:
         self.config = config
-        self._children_built = False  # flipped True by _ensure_children once the children are built
+        self._children_built = False  # flipped True by ensure_built once the children are built
+        self._building = False        # guards against a cyclic graph re-entering its own build
 
     def _build_children(self, factory: ComponentFactory) -> None:
         """
         Hook for container components. No-op for leaf components.
 
         Override to construct nested components from ``self.config`` using the SAME
-        factory, so the whole tree is built against one registry:
+        factory, so the whole tree is built against one registry. Children arrive as
+        already-validated ``Config`` objects (see ``ChildConfig``), so pass them to
+        ``factory.build`` — no re-validation:
 
             def _build_children(self, factory):
-                self.children = [factory.create(spec) for spec in self.config.children]
+                self.children = [factory.build(cfg) for cfg in self.config.children]
         """
 
-    def _ensure_children(self, factory: ComponentFactory | None = None) -> None:
+    def ensure_built(self, factory: ComponentFactory | None = None) -> None:
         """Build the children once and mark them built — the single owner of both the build and the
-        ``_children_built`` flag, so they can't drift apart. ``ComponentFactory.create`` calls this with
+        ``_children_built`` flag, so they can't drift apart. ``ComponentFactory.build`` calls this with
         itself, so the tree builds against the one registry; a directly-constructed container (tests,
-        ``Pipeline.from_stages``) calls it with no factory before first use and falls back to the global
-        one. Idempotent: a second call is a no-op."""
-        if not self._children_built:
-            from bausatz.component_factory import ComponentFactory
+        ``Pipeline.from_stages``) calls it with no factory before first use and falls back to the
+        family's scoped factory, then the global one.
 
-            self._children_built = True  # commit before building: a re-entrant call won't rebuild
-            # Fallback order: the caller's factory, the class family's scoped factory, the global.
-            self._build_children(factory or type(self)._factory or ComponentFactory.get())
+        Idempotent: a second call is a no-op. Exception-safe: the built flag is set only after
+        ``_build_children`` returns, so a failed build stays retriable rather than leaving a
+        half-built object that claims to be done. A genuine cycle (a component whose build re-enters
+        its own ``ensure_built``) raises rather than silently returning a partial object."""
+        if self._children_built:
+            return
+        if self._building:
+            raise RuntimeError(
+                f"cyclic component graph: building {type(self).__name__} re-entered its own "
+                f"ensure_built()"
+            )
+        from bausatz.component_factory import ComponentFactory
 
-    def to_json(self) -> dict[str, Any]:
+        # Fallback order: the caller's factory, the class family's scoped factory, the global.
+        resolved = factory or type(self)._factory or ComponentFactory.get()
+        self._building = True
+        try:
+            self._build_children(resolved)
+        finally:
+            self._building = False
+        self._children_built = True  # commit only after a successful build
+
+    def to_dict(self) -> dict[str, Any]:
         """Serialize back to the dict shape that ``ComponentFactory.create`` consumes."""
         return self.config.model_dump()
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.config!r})"
+
+
+# --------------------------------------------------------------------------- #
+# ChildConfig: a nested child spec, resolved to its concrete Config eagerly.
+# --------------------------------------------------------------------------- #
+def _resolve_child_config(value: Any, info: ValidationInfo) -> Any:
+    """Turn a child spec ``{"class_name": ..., ...}`` into its concrete ``Config`` subclass.
+
+    Runs during the *parent's* validation, so the whole tree is validated in one pass. The registry
+    is taken from the validation context (``model_validate(spec, context={"factory": f})``, which
+    ``ComponentFactory.validate``/``create`` seed with themselves) so a scoped factory resolves its
+    own tags; absent a context it falls back to the process-global factory. An already-resolved
+    ``Config`` instance passes straight through."""
+    if isinstance(value, Component.Config):
+        return value
+    if not isinstance(value, Mapping) or Component.DISCRIMINATOR not in value:
+        raise ValueError(
+            f"child spec must be a mapping with a {Component.DISCRIMINATOR!r} key: {value!r}"
+        )
+    from bausatz.component_factory import ComponentFactory
+
+    context = info.context or {}
+    factory = context.get("factory") or ComponentFactory.get()
+    klass = factory.registry.get(value[Component.DISCRIMINATOR])
+    # Thread the same context down so deeper descendants resolve against the same factory.
+    return klass.Config.model_validate(dict(value), context=info.context)
+
+
+# A container field type: ``layers: list[ChildConfig]`` / ``child: ChildConfig``. ``SerializeAsAny``
+# makes ``model_dump`` emit the concrete subclass's fields (not just the ``Component.Config`` base),
+# so ``to_dict`` round-trips the full tree; ``BeforeValidator`` does the dict -> concrete-Config
+# resolution above.
+ChildConfig = Annotated[SerializeAsAny[Component.Config], BeforeValidator(_resolve_child_config)]

@@ -6,7 +6,7 @@ registration mechanics.
 """
 
 from bausatz.registry import Registry
-from bausatz.component import Component
+from bausatz.component import ChildConfig, Component
 from bausatz.component_factory import ComponentFactory
 
-__all__ = ["Component", "ComponentFactory", "Registry"]
+__all__ = ["ChildConfig", "Component", "ComponentFactory", "Registry"]
