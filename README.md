@@ -66,6 +66,28 @@ class MyBase(Component, factory=my_factory):     # the whole subtree registers i
         pass
 ```
 
+## Native (C++) components
+
+A component's behavior can be implemented in C++. `CppComponent` is a `Component` whose compute is a
+native "engine" (typically a [pybind11](https://pybind11.readthedocs.io)-exposed class): the pydantic
+`Config` still does validation, tagging, registration and `to_dict`, while the engine — built from
+the *validated* config — does the work.
+
+```python
+class Affine(CppComponent):
+    class Config(Component.Config):
+        class_name: Literal["affine"] = "affine"
+        scale: float = 1.0
+    def _make_engine(self):                      # built lazily from the validated config
+        return AffineKernel(self.config.scale)   # a pybind11 extension type
+    def forward(self, x): return self.engine.forward(x)
+```
+
+The library ships a C++ base `bausatz::Component` (header-only) so native engines share a polymorphic
+root — enough for a C++ container to run a whole subtree natively. A downstream extension finds the
+headers with `bausatz.get_include()`. See [`examples/pybind`](examples/pybind) for a worked, compiled
+example (config-struct passing and a native composite).
+
 ## Design notes
 
 - **The tag lives on the Config** (`class_name: Literal["dense"] = "dense"`), so it serializes with

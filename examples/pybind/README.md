@@ -5,35 +5,47 @@ config/validation/registry/factory; C++ keeps the compute. Two shapes:
 
 ```
 # Composition — Python owns the tree, a C++ leaf does the compute:
-spec ─▶ ComponentFactory ─▶ Affine(CppComponent)            ← Python: pydantic Config, tag "affine"
+spec ─▶ ComponentFactory ─▶ Affine(CppComponent)                      ← Python: pydantic Config
                                 │  _make_engine: AffineConfig(scale, bias)   ← config struct
                                 ▼
-                           AffineKernel : bausatz::Component ← C++ (extension _affine)
+                           AffineKernel : Transform : bausatz::Component ← C++ (extension _affine)
 
 # Native subtree — a C++ composite runs the whole chain, no per-stage bounce to Python:
 spec ─▶ ComponentFactory ─▶ NativeSequential(CppComponent)
                                 │  _build_children → child Affines
                                 │  _make_engine: Sequential([child.engine, ...])
                                 ▼
-                           Sequential : bausatz::Component   ← chains children in C++
+                           Sequential : Transform : bausatz::Component  ← chains children in C++
 ```
 
-## The C++ `bausatz::Component` base
+## The library base vs. the app's compute interface
 
-`include/bausatz/component.hpp` declares an abstract base — the C++ mirror of the Python
-`Component` — with a virtual `forward`. `AffineKernel` (a leaf) and `Sequential` (a composite) both
-derive from it. Because `Sequential` holds its children as `std::shared_ptr<bausatz::Component>` and
-dispatches through the base, a whole subtree runs in C++ with a single `forward` call from Python.
+`bausatz::Component` is part of the **bausatz library**, not this example — the package ships the
+header and a downstream extension finds it with `bausatz.get_include()`:
+
+```python
+import bausatz
+Pybind11Extension(..., include_dirs=[bausatz.get_include()])   # #include <bausatz/component.hpp>
+```
+
+It is header-only (links nothing) and declares **no compute method** — what an engine computes is
+application-specific. So this example defines its *own* interface, `Transform : bausatz::Component`,
+and that is where `forward` lives. `AffineKernel` (a leaf) and `Sequential` (a composite) derive
+from `Transform`; `Sequential` holds its children as `std::shared_ptr<Transform>` and runs the whole
+chain in C++ from one `forward` call. The library base carries only shared plumbing (e.g. a `name`,
+mirroring `Component.Config.name`) and the `shared_ptr`-friendly polymorphic root.
 
 ## Files
 
 | file | role |
 |---|---|
-| `include/bausatz/component.hpp` | the C++ abstract base `bausatz::Component` (virtual `forward`) |
-| `src/affine.cpp` | `AffineConfig` struct, `AffineKernel` (leaf), `Sequential` (native composite), and the `PYBIND11_MODULE` |
+| `src/affine.cpp` | app interface `Transform`, `AffineConfig` struct, `AffineKernel` (leaf), `Sequential` (native composite), and the `PYBIND11_MODULE` |
 | `bausatz_affine/__init__.py` | `Affine` (config-struct passing) and `NativeSequential` (its engine is the C++ `Sequential`) |
-| `setup.py` | builds the extension with `Pybind11Extension` + `build_ext` (`include_dirs=["include"]`) |
-| `test_affine.py` | config-struct passing, polymorphism (`isinstance` of the base), native chaining + nesting, GIL/STL batch, and C++→Python exceptions |
+| `setup.py` | builds with `Pybind11Extension` + `build_ext`, `include_dirs=[bausatz.get_include()]` |
+| `test_affine.py` | config-struct passing, `forward` on `Transform` (not the base), the `name` plumbing, native chaining + nesting, GIL/STL batch, C++→Python exceptions |
+
+The C++ base and the pybind helpers live in the library: `src/bausatz/include/bausatz/component.hpp`
+and `.../pybind.hpp`.
 
 ## Build & run
 
@@ -47,12 +59,11 @@ Or install it as a package: `pip install --no-build-isolation .`
 
 ## What pybind11 is doing for you
 
-- **`py::class_<AffineKernel, bausatz::Component, std::shared_ptr<AffineKernel>>`** — exposes the C++
-  class as a Python type *and* records its base + a shared-ownership holder, so instances upcast to
-  `shared_ptr<bausatz::Component>` when handed to the `Sequential` constructor.
-- **Type casters (`<pybind11/stl.h>`)** — scalars cross as plain numbers; `list[Component]` ⇄
-  `std::vector<std::shared_ptr<bausatz::Component>>` and `list[float]` ⇄ `std::vector<double>` are
-  automatic. This is why handing a validated config into a C++ constructor needs *no* glue.
+- **`bausatz::bind_component<AffineKernel, Transform>(m, "AffineKernel")`** (from `<bausatz/pybind.hpp>`)
+  — the library's helper for `py::class_<T, Base, std::shared_ptr<T>>`: records the base and a
+  shared-ownership holder so instances upcast to `shared_ptr<Transform>` when handed to `Sequential`.
+- **Type casters (`<pybind11/stl.h>`)** — scalars cross as plain numbers; `list[Transform]` ⇄
+  `std::vector<std::shared_ptr<Transform>>` and `list[float]` ⇄ `std::vector<double>` are automatic.
 - **`py::call_guard<py::gil_scoped_release>()`** — releases the GIL around the C++ batch loop.
 - **Exception translation** — `std::invalid_argument` surfaces in Python as `ValueError`, next to
   pydantic's `ValidationError`.
@@ -70,7 +81,7 @@ is the validated source of truth in Python, and only plain data crosses into C++
 - **Composition** (`Affine`) is the default: least friction, and the Python tree stays in charge.
 - **Native subtree** (`NativeSequential`) pays off when the compute composition itself should run in
   C++ (tight loops over many stages, no per-node GIL crossing). Its children must themselves be
-  C++-backed — their `engine` is a `bausatz::Component`. Mixing in a pure-Python child won't work,
-  because the C++ `Sequential` only holds `bausatz::Component`s.
+  C++-backed — their `engine` is a `Transform`. Mixing in a pure-Python child won't work, because the
+  C++ `Sequential` only holds `Transform`s.
 - **Trampolines** (`PYBIND11_OVERRIDE`, not shown) are the third shape — for overriding a C++ virtual
   *in Python*, or a C++ driver calling back into Python stages.

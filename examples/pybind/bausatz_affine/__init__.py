@@ -5,19 +5,19 @@ Two shapes, both driven from Python as ordinary config-driven components:
     spec dict ─▶ ComponentFactory ─▶ Affine(CppComponent)          [Python: pydantic Config]
                                           │  _make_engine: AffineConfig(scale, bias)  ← config struct
                                           ▼
-                                     AffineKernel : bausatz::Component   [C++: extension _affine]
+                                     AffineKernel : Transform : bausatz::Component   [C++]
 
     spec dict ─▶ ComponentFactory ─▶ NativeSequential(CppComponent)
                                           │  _build_children → child Affines
                                           │  _make_engine: Sequential([child.engine, ...])
                                           ▼
-                                     Sequential : bausatz::Component     ← runs the chain in C++
+                                     Sequential : Transform : bausatz::Component  ← chain runs in C++
 
-``Affine`` shows config-struct passing (the pydantic config becomes a typed C++ ``AffineConfig``).
-``NativeSequential`` shows the native-composite shape: its engine is a C++ ``Sequential`` that holds
-the child kernels by ``bausatz::Component`` base pointer and runs the whole chain in C++, with no
-per-stage bounce back to Python. Its children must themselves be C++-backed (their ``engine`` is a
-``bausatz::Component``).
+``bausatz::Component`` (the library's C++ base, via ``bausatz.get_include()``) carries no compute
+method; the example defines its own compute interface ``Transform`` (that's where ``forward`` lives).
+``Affine`` shows config-struct passing; ``NativeSequential``'s engine is a C++ ``Sequential`` that
+holds the child transforms by base pointer and runs the whole chain in C++. Its children must
+themselves be C++-backed (their ``engine`` is a ``Transform``).
 """
 
 from __future__ import annotations
@@ -27,15 +27,23 @@ from typing import Literal
 from bausatz import Component, ComponentFactory, CppComponent
 
 # The pybind11 extension built from ../src/affine.cpp:
-#   Component     - the C++ abstract base (bausatz::Component), re-exported for isinstance checks
+#   Component     - the library C++ base (bausatz::Component), re-exported for isinstance checks
+#   Transform     - the example's compute interface (defines forward), deriving from Component
 #   AffineConfig  - the mirrored C++ config struct
-#   AffineKernel  - a leaf engine
-#   Sequential    - a native composite engine
-from ._affine import AffineConfig, AffineKernel
+#   AffineKernel  - a leaf transform
+#   Sequential    - a native composite transform
+from ._affine import AffineConfig, AffineKernel, Transform
 from ._affine import Component as NativeComponent
 from ._affine import Sequential as _SequentialEngine
 
-__all__ = ["Affine", "AffineConfig", "AffineKernel", "NativeComponent", "NativeSequential"]
+__all__ = [
+    "Affine",
+    "AffineConfig",
+    "AffineKernel",
+    "NativeComponent",
+    "NativeSequential",
+    "Transform",
+]
 
 
 class Affine(CppComponent):
@@ -51,7 +59,10 @@ class Affine(CppComponent):
     def _make_engine(self) -> AffineKernel:
         # Config-struct passing: build the typed C++ AffineConfig from the validated pydantic config,
         # then hand that one object to the kernel (rather than a positional arg list).
-        return AffineKernel(AffineConfig(scale=self.config.scale, bias=self.config.bias))
+        kernel = AffineKernel(AffineConfig(scale=self.config.scale, bias=self.config.bias))
+        if self.config.name:
+            kernel.name = self.config.name  # carry the config name onto the C++ base (plumbing)
+        return kernel
 
     def forward(self, x: float) -> float:
         return self.engine.forward(x)
@@ -78,8 +89,8 @@ class NativeSequential(CppComponent):
         self.stages = [factory.build(cfg) for cfg in self.config.stages]
 
     def _make_engine(self) -> _SequentialEngine:
-        # Hand each child's native engine (a bausatz::Component) to the C++ Sequential, which owns
-        # them via shared_ptr and runs the chain natively.
+        # Hand each child's native engine (a Transform) to the C++ Sequential, which owns them via
+        # shared_ptr and runs the chain natively.
         return _SequentialEngine([stage.engine for stage in self.stages])
 
     def forward(self, x: float) -> float:

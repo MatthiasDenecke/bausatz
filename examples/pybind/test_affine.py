@@ -15,13 +15,14 @@ from bausatz_affine import (
     AffineKernel,
     NativeComponent,
     NativeSequential,
+    Transform,
 )
 
 from bausatz import ComponentFactory
 
 
 # --------------------------------------------------------------------------- #
-# The C++ layer: config struct, leaf kernel, abstract base.
+# The C++ layer: library base, app compute interface, config struct, leaf.
 # --------------------------------------------------------------------------- #
 def test_config_struct_is_a_bound_cpp_type():
     cfg = AffineConfig(scale=3.0, bias=1.0)
@@ -30,10 +31,25 @@ def test_config_struct_is_a_bound_cpp_type():
     assert repr(cfg).startswith("AffineConfig(scale=3")
 
 
-def test_kernel_is_a_bausatz_component_subclass():
+def test_forward_lives_on_the_app_interface_not_the_library_base():
+    # bausatz::Component (the library base) carries no compute method; the example's Transform does.
+    assert issubclass(Transform, NativeComponent)
+    assert hasattr(Transform, "forward")
+    assert not hasattr(NativeComponent, "forward")
+
+
+def test_kernel_is_a_transform_and_a_library_component():
     k = AffineKernel(AffineConfig(scale=2.0, bias=0.5))
-    assert isinstance(k, NativeComponent)  # AffineKernel : bausatz::Component
+    assert isinstance(k, Transform)         # AffineKernel : Transform
+    assert isinstance(k, NativeComponent)   # ... : bausatz::Component
     assert k.forward(10.0) == 20.5
+
+
+def test_name_plumbing_on_the_library_base():
+    k = AffineKernel(AffineConfig(scale=1.0))
+    assert k.name == ""          # default from bausatz::Component
+    k.name = "layer-0"
+    assert k.name == "layer-0"
 
 
 def test_zero_scale_cpp_exception_becomes_python_valueerror():
@@ -45,11 +61,14 @@ def test_zero_scale_cpp_exception_becomes_python_valueerror():
 # Affine: a CppComponent using config-struct passing.
 # --------------------------------------------------------------------------- #
 def test_factory_builds_affine_via_config_struct():
-    comp = ComponentFactory.get().create({"class_name": "affine", "scale": 10.0, "bias": -1.0})
+    comp = ComponentFactory.get().create(
+        {"class_name": "affine", "name": "enc", "scale": 10.0, "bias": -1.0}
+    )
     assert isinstance(comp, Affine)
     assert comp.forward(2.0) == 19.0             # 10*2 - 1, computed in C++
     assert isinstance(comp.engine, AffineKernel)
     assert comp.engine is comp.engine            # cached
+    assert comp.engine.name == "enc"             # config.name carried onto the C++ base
     # The bad-config path surfaces the C++ exception through the component too.
     with pytest.raises(ValueError, match="scale must be non-zero"):
         Affine(Affine.Config(scale=0.0)).engine
@@ -74,8 +93,8 @@ def test_native_sequential_runs_the_chain_in_cpp():
         }
     )
     assert isinstance(seq, NativeSequential)
-    # The engine is a single native composite (a bausatz::Component), not a Python loop.
-    assert isinstance(seq.engine, NativeComponent)
+    # The engine is a single native composite (a Transform / bausatz::Component), not a Python loop.
+    assert isinstance(seq.engine, Transform)
     assert seq.engine.size == 2
     assert seq.forward(3.0) == 11.0              # 2*3 = 6, then 6 + 5 = 11 — all in C++
 

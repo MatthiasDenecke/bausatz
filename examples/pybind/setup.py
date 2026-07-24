@@ -11,11 +11,13 @@ Or install the example package:      pip install --no-build-isolation .
 from pybind11.setup_helpers import Pybind11Extension, build_ext
 from setuptools import setup
 
+import bausatz  # the library ships the C++ headers; locate them with get_include()
+
 ext_modules = [
     Pybind11Extension(
         "bausatz_affine._affine",   # -> bausatz_affine/_affine*.so
         ["src/affine.cpp"],
-        include_dirs=["include"],   # bausatz/component.hpp (the C++ Component ABC)
+        include_dirs=[bausatz.get_include()],   # #include <bausatz/component.hpp> / <bausatz/pybind.hpp>
         cxx_std=17,
     ),
 ]
