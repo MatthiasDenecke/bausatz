@@ -21,8 +21,15 @@ def get_include() -> str:
 
         import bausatz
         Pybind11Extension(..., include_dirs=[bausatz.get_include()])  # #include <bausatz/component.hpp>
+
+    In the repo the headers live at the top-level ``inc/``; an installed wheel bundles them into the
+    package (see ``setup.py``). This returns whichever exists.
     """
-    return os.path.join(os.path.dirname(__file__), "inc")
+    here = os.path.dirname(os.path.abspath(__file__))
+    packaged = os.path.join(here, "inc")  # installed wheel: headers copied into the package
+    if os.path.isdir(packaged):
+        return packaged
+    return os.path.abspath(os.path.join(here, os.pardir, os.pardir, "inc"))  # repo: top-level inc/
 
 
 __all__ = ["Component", "ComponentFactory", "CppComponent", "Registry", "get_include"]

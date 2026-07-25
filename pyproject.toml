@@ -35,7 +35,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-bausatz = ["py.typed", "inc/bausatz/*.hpp"]
+bausatz = ["py.typed", "inc/bausatz/*.hpp"]  # inc/ is copied into the package at build (see setup.py)
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

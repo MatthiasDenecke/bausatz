@@ -45,8 +45,9 @@ set at construction and never changed.
 | `setup.py` | builds with `Pybind11Extension` + `build_ext`, `include_dirs=[bausatz.get_include()]` |
 | `test_affine.py` | declarative build, immutable `name`, `forward` on `Transform` (not the base), native chaining + nesting, GIL/STL batch, C++→Python exceptions |
 
-The C++ base and the pybind helpers live in the library: `src/bausatz/inc/bausatz/component.hpp`
-and `.../pybind.hpp`.
+The C++ base and the pybind helpers live in the library at the repo top level:
+`inc/bausatz/component.hpp` and `inc/bausatz/pybind.hpp` (an installed wheel bundles them into the
+package, so `bausatz.get_include()` resolves either way).
 
 ## Build & run
 
