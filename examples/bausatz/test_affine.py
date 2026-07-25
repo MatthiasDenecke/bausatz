@@ -1,15 +1,15 @@
 """End-to-end test of the C++-backed components.
 
 Run after building the extension (`python setup.py build_ext --inplace`):
-    python -m pytest examples/pybind/test_affine.py
+    python -m pytest examples/bausatz/test_affine.py
 """
 
 from __future__ import annotations
 
-# The built ``bausatz_affine`` package (with its compiled ``_affine`` extension) imports directly
-# because pytest's default (prepend) import mode puts this directory on sys.path when collecting.
+# The built ``affine`` package (with its compiled ``_affine`` extension) imports directly because
+# pytest's default (prepend) import mode puts this directory on sys.path when collecting.
 import pytest
-from bausatz_affine import (
+from affine import (
     Affine,
     AffineKernel,
     NativeComponent,

@@ -19,7 +19,7 @@ breaking changes.
 - **Shipped C++ headers.** The package now ships a header-only C++ base `bausatz::Component` (with an
   immutable `name` set at construction) plus pybind11 binding helpers (`bind_component`, which also
   supplies a default `__repr__`); a downstream extension locates them with `bausatz.get_include()`.
-  A worked, compiled example lives in [`examples/pybind`](examples/pybind) (a declarative leaf and a
+  A worked, compiled example lives in [`examples/bausatz`](examples/bausatz) (a declarative leaf and a
   native C++ composite).
 - **Typed children.** Container child fields are typed as a `Config`
   (`list[Retriever.Config]`, `dict[str, Component.Config]`, an optional one, …). The whole config

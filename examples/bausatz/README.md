@@ -41,7 +41,8 @@ set at construction and never changed.
 | file | role |
 |---|---|
 | `src/affine.cpp` | app interface `Transform`, `AffineKernel` (leaf, ctor takes config fields as kwargs), `Sequential` (native composite), and the `PYBIND11_MODULE` |
-| `bausatz_affine/__init__.py` | `Affine` (declarative — just `component=AffineKernel`) and `NativeSequential` (overrides `_create_component`) |
+| `affine/components.py` | the Python component classes: `Affine` (declarative — just `component=AffineKernel`) and `NativeSequential` (overrides `_create_component`) |
+| `affine/__init__.py` | re-exports the public API (`affine._affine` is the compiled extension) |
 | `setup.py` | builds with `Pybind11Extension` + `build_ext`, `include_dirs=[bausatz.get_include()]` |
 | `test_affine.py` | declarative build, immutable `name`, `forward` on `Transform` (not the base), native chaining + nesting, GIL/STL batch, C++→Python exceptions |
 
@@ -53,7 +54,7 @@ package, so `bausatz.get_include()` resolves either way).
 
 ```bash
 pip install pybind11                         # build-time dependency
-python setup.py build_ext --inplace          # compiles bausatz_affine/_affine*.so
+python setup.py build_ext --inplace          # compiles affine/_affine*.so
 python -m pytest test_affine.py
 ```
 

@@ -15,7 +15,7 @@ import bausatz  # the library ships the C++ headers; locate them with get_includ
 
 ext_modules = [
     Pybind11Extension(
-        "bausatz_affine._affine",   # -> bausatz_affine/_affine*.so
+        "affine._affine",   # -> affine/_affine*.so
         ["src/affine.cpp"],
         include_dirs=[bausatz.get_include()],   # #include <bausatz/component.hpp> / <bausatz/pybind.hpp>
         cxx_std=17,
@@ -26,7 +26,7 @@ setup(
     name="bausatz-affine",
     version="0.1.0",
     description="Example: a C++ AffineKernel driven from Python as a bausatz component",
-    packages=["bausatz_affine"],
+    packages=["affine"],
     ext_modules=ext_modules,
     cmdclass={"build_ext": build_ext},
     python_requires=">=3.12",

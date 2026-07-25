@@ -1,4 +1,4 @@
-"""C++-backed bausatz components.
+"""The C++-backed component classes.
 
 Two shapes, both driven from Python as ordinary config-driven components:
 
@@ -29,15 +29,10 @@ from typing import Literal
 from bausatz import Component, ComponentFactory, CppComponent
 
 # The pybind11 extension built from ../src/affine.cpp:
-#   Component     - the library C++ base (bausatz::Component), re-exported for isinstance checks
-#   Transform     - the example's compute interface (defines forward), deriving from Component
-#   AffineKernel  - a leaf transform whose ctor takes (scale, bias) keyword args
-#   Sequential    - a native composite transform
-from ._affine import AffineKernel, Transform
-from ._affine import Component as NativeComponent
+#   AffineKernel - a leaf transform whose ctor takes (scale, bias, name) keyword args
+#   Sequential   - a native composite transform
+from ._affine import AffineKernel
 from ._affine import Sequential as _SequentialComponent
-
-__all__ = ["Affine", "AffineKernel", "NativeComponent", "NativeSequential", "Transform"]
 
 
 class Affine(CppComponent, component=AffineKernel):

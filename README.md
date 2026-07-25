@@ -92,7 +92,7 @@ class Affine(CppComponent, component=AffineKernel):   # AffineKernel is a pybind
 The library ships a C++ base `bausatz::Component` (header-only) so native components share a
 polymorphic root — enough for a C++ container to run a whole subtree natively. A downstream extension
 finds the
-headers with `bausatz.get_include()`. See [`examples/pybind`](examples/pybind) for a worked, compiled
+headers with `bausatz.get_include()`. See [`examples/bausatz`](examples/bausatz) for a worked, compiled
 example (a declarative leaf and a native C++ composite).
 
 ## Design notes

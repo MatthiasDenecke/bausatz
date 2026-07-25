@@ -1,6 +1,6 @@
 """CppComponent bridge: declarative native-component construction from the validated config,
 delegation, and factory integration. The native class here is a pure-Python stand-in so the core
-test suite needs no compiler — the compiled pybind11 counterpart lives in examples/pybind.
+test suite needs no compiler — the compiled pybind11 counterpart lives in examples/bausatz.
 """
 
 from __future__ import annotations
