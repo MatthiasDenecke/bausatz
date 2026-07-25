@@ -32,8 +32,9 @@ It is header-only (links nothing) and declares **no compute method** — what a 
 application-specific. So this example defines its *own* interface, `Transform : bausatz::Component`,
 and that is where `forward` lives. `AffineKernel` (a leaf) and `Sequential` (a composite) derive
 from `Transform`; `Sequential` holds its children as `std::shared_ptr<Transform>` and runs the whole
-chain in C++ from one `forward` call. The library base carries only shared plumbing (e.g. a `name`,
-mirroring `Component.Config.name`) and the `shared_ptr`-friendly polymorphic root.
+chain in C++ from one `forward` call. The library base carries only shared plumbing — the
+`shared_ptr`-friendly polymorphic root and an immutable `name` (mirroring `Component.Config.name`),
+set at construction and never changed.
 
 ## Files
 
@@ -42,9 +43,9 @@ mirroring `Component.Config.name`) and the `shared_ptr`-friendly polymorphic roo
 | `src/affine.cpp` | app interface `Transform`, `AffineKernel` (leaf, ctor takes config fields as kwargs), `Sequential` (native composite), and the `PYBIND11_MODULE` |
 | `bausatz_affine/__init__.py` | `Affine` (declarative — just `component=AffineKernel`) and `NativeSequential` (overrides `_create_component`) |
 | `setup.py` | builds with `Pybind11Extension` + `build_ext`, `include_dirs=[bausatz.get_include()]` |
-| `test_affine.py` | declarative build + `name` plumbing, `forward` on `Transform` (not the base), native chaining + nesting, GIL/STL batch, C++→Python exceptions |
+| `test_affine.py` | declarative build, immutable `name`, `forward` on `Transform` (not the base), native chaining + nesting, GIL/STL batch, C++→Python exceptions |
 
-The C++ base and the pybind helpers live in the library: `src/bausatz/include/bausatz/component.hpp`
+The C++ base and the pybind helpers live in the library: `src/bausatz/inc/bausatz/component.hpp`
 and `.../pybind.hpp`.
 
 ## Build & run
@@ -61,9 +62,11 @@ Or install it as a package: `pip install --no-build-isolation .`
 
 - **`bausatz::bind_component<AffineKernel, Transform>(m, "AffineKernel")`** (from `<bausatz/pybind.hpp>`)
   — the library's helper for `py::class_<T, Base, std::shared_ptr<T>>`: records the base and a
-  shared-ownership holder so instances upcast to `shared_ptr<Transform>` when handed to `Sequential`.
-- **Keyword-argument constructors** (`py::arg("scale")`, `py::arg("bias")`) — let `CppComponent` build
-  the native object generically by splatting the validated config: `AffineKernel(**fields)`.
+  shared-ownership holder so instances upcast to `shared_ptr<Transform>` when handed to `Sequential`,
+  and supplies a default `__repr__` (so there are no per-class repr lambdas).
+- **Keyword-argument constructors** (`py::arg("scale")`, `py::arg("bias")`, `py::arg("name")`) — let
+  `CppComponent` build the native object generically by splatting the validated config:
+  `AffineKernel(**fields)`. The batched `forward_many` lives once on `Transform`, not per leaf.
 - **Type casters (`<pybind11/stl.h>`)** — scalars cross as plain numbers; `list[Transform]` ⇄
   `std::vector<std::shared_ptr<Transform>>` and `list[float]` ⇄ `std::vector<double>` are automatic.
 - **`py::call_guard<py::gil_scoped_release>()`** — releases the GIL around the C++ batch loop.

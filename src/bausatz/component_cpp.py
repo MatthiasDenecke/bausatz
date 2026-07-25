@@ -23,9 +23,10 @@ needs no more code than a pure-Python component:
             return self.component.forward(x)              # straight into C++
 
 The default ``_create_component`` calls ``component_cls(**fields)``, where ``fields`` is the
-validated config minus the framework-only ``class_name`` / ``name`` (the field names must match the
-native constructor's keyword arguments). Components that need custom construction — notably
-containers that build child components — override ``_create_component`` instead.
+validated config minus the framework-only ``class_name`` (the field names must match the native
+constructor's keyword arguments — including ``name``, which the native component takes at
+construction and keeps immutably). Components that need custom construction — notably containers that
+build child components — override ``_create_component`` instead.
 """
 
 from __future__ import annotations
@@ -77,23 +78,27 @@ class CppComponent(Component):
 
     def _component_fields(self) -> dict[str, Any]:
         """The validated config fields passed as keyword args to ``component_cls``. Defaults to the
-        whole config minus the framework-only ``class_name`` / ``name``; override to rename, filter,
-        or remap fields for the native constructor."""
-        return self.config.model_dump(exclude={Component.DISCRIMINATOR, "name"})
+        whole config minus the framework-only ``class_name``; override to rename, filter, or remap
+        fields for the native constructor.
+
+        ``name`` is kept: the native component takes its name at construction (``bausatz::Component``
+        makes it immutable). Since the config's ``name`` is ``str | None`` while the native side
+        expects a string, ``None`` is normalized to ``""``."""
+        fields = self.config.model_dump(exclude={Component.DISCRIMINATOR})
+        if fields.get("name") is None:
+            fields["name"] = ""
+        return fields
 
     def _create_component(self) -> Any:
-        """Construct the native component from the config. Default:
-        ``component_cls(**self._component_fields())``, carrying ``config.name`` onto it. Override for
-        custom construction — e.g. a container that builds its child components."""
+        """Construct the native component from the config —
+        ``component_cls(**self._component_fields())``. Override for custom construction, e.g. a
+        container that builds its child components."""
         if self.component_cls is None:
             raise NotImplementedError(
                 f"{type(self).__name__} has no component_cls; declare `component=` or override "
                 f"_create_component()."
             )
-        component = self.component_cls(**self._component_fields())
-        if self.config.name and hasattr(component, "name"):
-            component.name = self.config.name  # carry the config name onto the native component
-        return component
+        return self.component_cls(**self._component_fields())
 
     @property
     def component(self) -> Any:

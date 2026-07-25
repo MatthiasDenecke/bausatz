@@ -27,16 +27,16 @@ public:
     Component(const Component &) = delete;
     Component &operator=(const Component &) = delete;
 
-    // Optional label, mirroring the Python ``Component.Config.name`` — plumbing for logging, repr,
-    // or lookup, carried onto the component without teaching C++ anything about pydantic.
+    // Optional label, mirroring the Python ``Component.Config.name``. Set once at construction and
+    // immutable thereafter (no setter, ``const`` member) — the name a component is built with is the
+    // name it keeps for its whole lifetime.
     const std::string &name() const noexcept { return name_; }
-    void set_name(std::string name) { name_ = std::move(name); }
 
 protected:
-    Component() = default;  // a base: constructed only through a subclass
+    explicit Component(std::string name = "") : name_(std::move(name)) {}
 
 private:
-    std::string name_;
+    const std::string name_;
 };
 
 // A list of components held polymorphically — e.g. the children a native container owns.

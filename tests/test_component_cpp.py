@@ -13,15 +13,16 @@ from bausatz import Component, ComponentFactory, CppComponent, Registry
 
 
 class FakeKernel:
-    """Stands in for a pybind11-exposed C++ class: its ctor takes the config fields as keyword
-    arguments (scale, bias), exactly as a pybind ``py::arg``-bound constructor would."""
+    """Stands in for a pybind11-exposed C++ class: its ctor takes the config fields (and the
+    component's name) as keyword arguments, exactly as a pybind ``py::arg``-bound constructor would."""
 
     instances = 0
 
-    def __init__(self, scale: float, bias: float) -> None:
+    def __init__(self, scale: float, bias: float, name: str = "") -> None:
         FakeKernel.instances += 1
         self.scale = scale
         self.bias = bias
+        self.name = name
 
     def apply(self, x: float) -> float:
         return self.scale * x + self.bias
@@ -64,10 +65,13 @@ def test_component_is_built_lazily_once_and_cached():
     assert comp.component is native  # cached, not rebuilt
 
 
-def test_declarative_marshals_only_config_fields(factory):
-    # class_name and name are framework-only and are NOT passed to the native constructor.
+def test_declarative_marshals_config_fields_and_name(factory):
+    # class_name is framework-only (not passed); the config fields AND the name reach the ctor.
     comp = factory.create({"class_name": "affine-stub", "name": "enc", "scale": 4.0, "bias": 2.0})
     assert comp.component.scale == 4.0 and comp.component.bias == 2.0
+    assert comp.component.name == "enc"          # name passed to the constructor
+    # An unnamed component gets "" (config name None -> ""), not None.
+    assert factory.create({"class_name": "affine-stub"}).component.name == ""
 
 
 def test_config_still_validates_and_round_trips(factory):

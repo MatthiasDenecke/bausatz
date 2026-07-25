@@ -16,9 +16,10 @@ breaking changes.
   `_create_component` for custom construction, e.g. containers). The native object is built lazily
   and cached; the pydantic `Config` still owns validation, the `class_name` tag, registration, and
   `to_dict`.
-- **Shipped C++ headers.** The package now ships a header-only C++ base `bausatz::Component` plus
-  pybind11 binding helpers; a downstream extension locates them with `bausatz.get_include()`. A
-  worked, compiled example lives in [`examples/pybind`](examples/pybind) (config-struct passing and a
+- **Shipped C++ headers.** The package now ships a header-only C++ base `bausatz::Component` (with an
+  immutable `name` set at construction) plus pybind11 binding helpers (`bind_component`, which also
+  supplies a default `__repr__`); a downstream extension locates them with `bausatz.get_include()`.
+  A worked, compiled example lives in [`examples/pybind`](examples/pybind) (a declarative leaf and a
   native C++ composite).
 - **Typed children.** Container child fields are typed as a `Config`
   (`list[Retriever.Config]`, `dict[str, Component.Config]`, an optional one, …). The whole config

@@ -23,12 +23,13 @@ from bausatz import ComponentFactory
 # --------------------------------------------------------------------------- #
 # The C++ layer: library base, app compute interface, leaf kernel.
 # --------------------------------------------------------------------------- #
-def test_kernel_ctor_takes_config_fields_as_kwargs():
-    # The constructor takes the config fields directly (this is what lets CppComponent build it
-    # generically by splatting the validated config).
-    k = AffineKernel(scale=3.0, bias=1.0)
+def test_kernel_ctor_takes_config_fields_and_name_as_kwargs():
+    # The constructor takes the config fields (and name) directly — this is what lets CppComponent
+    # build it generically by splatting the validated config.
+    k = AffineKernel(scale=3.0, bias=1.0, name="k")
     assert k.forward(2.0) == 7.0
-    assert repr(k).startswith("AffineKernel(scale=3")
+    assert repr(k) == "AffineKernel(name='k')"      # default __repr__ from bind_component
+    assert repr(AffineKernel(scale=1.0)) == "AffineKernel()"
 
 
 def test_forward_lives_on_the_app_interface_not_the_library_base():
@@ -45,11 +46,11 @@ def test_kernel_is_a_transform_and_a_library_component():
     assert k.forward(10.0) == 20.5
 
 
-def test_name_plumbing_on_the_library_base():
-    k = AffineKernel(scale=1.0)
-    assert k.name == ""          # default from bausatz::Component
-    k.name = "layer-0"
-    assert k.name == "layer-0"
+def test_name_is_set_at_construction_and_immutable():
+    assert AffineKernel(scale=1.0).name == ""             # default
+    assert AffineKernel(scale=1.0, name="layer-0").name == "layer-0"
+    with pytest.raises(AttributeError):
+        AffineKernel(scale=1.0, name="layer-0").name = "changed"   # read-only, no setter
 
 
 def test_zero_scale_cpp_exception_becomes_python_valueerror():

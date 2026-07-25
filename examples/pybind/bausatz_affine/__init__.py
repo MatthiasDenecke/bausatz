@@ -82,7 +82,9 @@ class NativeSequential(CppComponent):
     def _create_component(self) -> _SequentialComponent:
         # Custom construction: hand each child's native component (a Transform) to the C++ Sequential,
         # which owns them via shared_ptr and runs the chain natively.
-        return _SequentialComponent([stage.component for stage in self.stages])
+        return _SequentialComponent(
+            [stage.component for stage in self.stages], name=self.config.name or ""
+        )
 
     def forward(self, x: float) -> float:
         return self.component.forward(x)

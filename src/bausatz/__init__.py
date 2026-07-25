@@ -22,7 +22,7 @@ def get_include() -> str:
         import bausatz
         Pybind11Extension(..., include_dirs=[bausatz.get_include()])  # #include <bausatz/component.hpp>
     """
-    return os.path.join(os.path.dirname(__file__), "include")
+    return os.path.join(os.path.dirname(__file__), "inc")
 
 
 __all__ = ["Component", "ComponentFactory", "CppComponent", "Registry", "get_include"]
