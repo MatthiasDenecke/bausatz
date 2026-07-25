@@ -3,3 +3,5 @@
 # version — and `python -m build` builds the wheel *from* the sdist, so a header missing here would
 # also be missing from the published wheel. See bausatz.get_include().
 recursive-include src/bausatz/include *.hpp
+
+include CHANGELOG.md

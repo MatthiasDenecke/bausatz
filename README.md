@@ -8,7 +8,9 @@
 *German: “construction kit.”*
 
 **Config-driven component trees for Python** — pydantic-validated classes that self-register by a
-`class_name` tag and assemble recursively from plain dict/JSON/YAML specs.
+`class_name` tag and assemble recursively from plain dict/JSON/YAML specs. Components can be pure
+Python or **backed by C++** (via pybind11) — same config, same factory, either way. See
+[Native (C++) components](#native-c-components).
 
 ```python
 from typing import Literal
@@ -49,6 +51,7 @@ back to the spec that built it.
 | `Component` | base for buildable classes — declares a typed nested `Config` (pydantic) and self-registers at class-definition time by its `class_name` tag |
 | `ComponentFactory` | `validate(spec)` → a typed `Config` (children resolved), `build(config)` → the instance, and `create = build∘validate` (plus typed `create_as` / `build_as` and `create_many`), recursing into container children; `config_adapter()` builds a pydantic **discriminated union** over every registered Config for one-pass validation of whole trees |
 | `Registry` | the tag → class table; duplicate tags fail loudly |
+| `CppComponent` | a `Component` whose compute is a native (C++) engine built from the validated config — see [Native (C++) components](#native-c-components) |
 
 A container's child fields are typed as a `Config` (`list[Retriever.Config]`, `dict[str, Component.Config]`, an optional one, …); `Component.Config` resolves each nested spec into its concrete Config eagerly, in the parent's validation pass — no dedicated child-field type to import.
 
