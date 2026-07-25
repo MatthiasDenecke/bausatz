@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 from bausatz_affine import (
     Affine,
-    AffineConfig,
     AffineKernel,
     NativeComponent,
     NativeSequential,
@@ -22,13 +21,14 @@ from bausatz import ComponentFactory
 
 
 # --------------------------------------------------------------------------- #
-# The C++ layer: library base, app compute interface, config struct, leaf.
+# The C++ layer: library base, app compute interface, leaf kernel.
 # --------------------------------------------------------------------------- #
-def test_config_struct_is_a_bound_cpp_type():
-    cfg = AffineConfig(scale=3.0, bias=1.0)
-    assert cfg.scale == 3.0 and cfg.bias == 1.0
-    assert AffineKernel(cfg).forward(2.0) == 7.0
-    assert repr(cfg).startswith("AffineConfig(scale=3")
+def test_kernel_ctor_takes_config_fields_as_kwargs():
+    # The constructor takes the config fields directly (this is what lets CppComponent build it
+    # generically by splatting the validated config).
+    k = AffineKernel(scale=3.0, bias=1.0)
+    assert k.forward(2.0) == 7.0
+    assert repr(k).startswith("AffineKernel(scale=3")
 
 
 def test_forward_lives_on_the_app_interface_not_the_library_base():
@@ -39,14 +39,14 @@ def test_forward_lives_on_the_app_interface_not_the_library_base():
 
 
 def test_kernel_is_a_transform_and_a_library_component():
-    k = AffineKernel(AffineConfig(scale=2.0, bias=0.5))
+    k = AffineKernel(scale=2.0, bias=0.5)
     assert isinstance(k, Transform)         # AffineKernel : Transform
     assert isinstance(k, NativeComponent)   # ... : bausatz::Component
     assert k.forward(10.0) == 20.5
 
 
 def test_name_plumbing_on_the_library_base():
-    k = AffineKernel(AffineConfig(scale=1.0))
+    k = AffineKernel(scale=1.0)
     assert k.name == ""          # default from bausatz::Component
     k.name = "layer-0"
     assert k.name == "layer-0"
@@ -54,24 +54,24 @@ def test_name_plumbing_on_the_library_base():
 
 def test_zero_scale_cpp_exception_becomes_python_valueerror():
     with pytest.raises(ValueError, match="scale must be non-zero"):
-        AffineKernel(AffineConfig(scale=0.0))
+        AffineKernel(scale=0.0)
 
 
 # --------------------------------------------------------------------------- #
-# Affine: a CppComponent using config-struct passing.
+# Affine: a declarative CppComponent — no construction code, just `component=`.
 # --------------------------------------------------------------------------- #
-def test_factory_builds_affine_via_config_struct():
+def test_factory_builds_affine_declaratively():
     comp = ComponentFactory.get().create(
         {"class_name": "affine", "name": "enc", "scale": 10.0, "bias": -1.0}
     )
     assert isinstance(comp, Affine)
-    assert comp.forward(2.0) == 19.0             # 10*2 - 1, computed in C++
-    assert isinstance(comp.engine, AffineKernel)
-    assert comp.engine is comp.engine            # cached
-    assert comp.engine.name == "enc"             # config.name carried onto the C++ base
+    assert comp.forward(2.0) == 19.0                 # 10*2 - 1, computed in C++
+    assert isinstance(comp.component, AffineKernel)
+    assert comp.component is comp.component           # cached
+    assert comp.component.name == "enc"              # config.name carried onto the native component
     # The bad-config path surfaces the C++ exception through the component too.
     with pytest.raises(ValueError, match="scale must be non-zero"):
-        Affine(Affine.Config(scale=0.0)).engine
+        Affine(Affine.Config(scale=0.0)).component
 
 
 def test_batched_path_crosses_stl_type_caster():
@@ -93,9 +93,9 @@ def test_native_sequential_runs_the_chain_in_cpp():
         }
     )
     assert isinstance(seq, NativeSequential)
-    # The engine is a single native composite (a Transform / bausatz::Component), not a Python loop.
-    assert isinstance(seq.engine, Transform)
-    assert seq.engine.size == 2
+    # The component is a single native composite (a Transform / bausatz::Component), not a Python loop.
+    assert isinstance(seq.component, Transform)
+    assert seq.component.size == 2
     assert seq.forward(3.0) == 11.0              # 2*3 = 6, then 6 + 5 = 11 — all in C++
 
 

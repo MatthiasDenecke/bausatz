@@ -1,72 +1,103 @@
 """Bridge for components whose behavior is implemented natively — typically a C++ class exposed
-with pybind11, though any Python-callable object works as the "engine".
+with pybind11, though any Python-callable class works.
 
-The division of labor is the whole point:
+The division of labor:
 
   * The pydantic ``Config`` keeps everything that makes a component config-driven — field
     validation, the ``class_name`` tag, factory registration, ``to_dict`` round-trip — all in
-    Python, where pydantic lives. The C++ side never parses or validates a spec.
-  * The native **engine** owns the compute. It is constructed from the *already-validated* config,
-    so crossing the language boundary is just handing plain numbers/strings/lists (pybind11's type
-    casters convert them) to a constructor.
+    Python, where pydantic lives. The native side never parses or validates a spec.
+  * The native **component** owns the compute. It is constructed from the *already-validated*
+    config.
 
-A ``CppComponent`` is an ordinary ``Component``: it self-registers by its tag and the
-``ComponentFactory`` builds it from a spec exactly like any other. It simply delegates its methods
-to the engine. Subclasses implement ``_make_engine`` to construct the native object from
-``self.config``:
+The construction is declarative: a subclass names the native class it wraps, and the framework
+builds it by marshalling the validated config fields in as keyword arguments — so a C++-backed leaf
+needs no more code than a pure-Python component:
 
-    class Affine(CppComponent):
+    class Affine(CppComponent, component=AffineKernel):   # AffineKernel is a pybind11 class
         class Config(Component.Config):
             class_name: Literal["affine"] = "affine"
             scale: float = 1.0
             bias: float = 0.0
-        config: Affine.Config
 
-        def _make_engine(self):
-            from bausatz_affine import AffineKernel      # the pybind11 extension type
-            return AffineKernel(self.config.scale, self.config.bias)
+        def forward(self, x):
+            return self.component.forward(x)              # straight into C++
 
-        def forward(self, x: float) -> float:
-            return self.engine.apply(x)                  # straight into C++
+The default ``_create_component`` calls ``component_cls(**fields)``, where ``fields`` is the
+validated config minus the framework-only ``class_name`` / ``name`` (the field names must match the
+native constructor's keyword arguments). Components that need custom construction — notably
+containers that build child components — override ``_create_component`` instead.
 """
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from typing import Any
+from collections.abc import Callable
+from typing import Any, ClassVar
+
+from pydantic_core import PydanticUndefined
 
 from bausatz.component import Component
 
-_UNSET: Any = object()  # a private sentinel, distinct from a legitimate ``None`` engine
+_UNSET: Any = object()  # a private sentinel, distinct from a legitimate ``None`` component
 
 
-class CppComponent(Component, ABC):
-    """A ``Component`` whose behavior is provided by a native engine object.
+class CppComponent(Component):
+    """A ``Component`` whose behavior is provided by a native component object.
 
-    Abstract: a subclass must implement ``_make_engine``, so forgetting to fails at construction —
-    not later, at first ``engine`` access. (Unlike ``Component``, whose only "abstract" contract is
-    a pinned ``class_name``, this base has a genuine abstract method, so ``ABC`` earns its place.)
+    Declare the native class with ``class Foo(CppComponent, component=NativeFoo)`` (or set
+    ``component_cls`` directly). The native object is built lazily on first access to ``component``
+    and cached — so a ``CppComponent`` is usable whether it was assembled by the factory or
+    constructed directly.
 
-    The engine is built once, lazily, from the validated config and cached — so a ``CppComponent``
-    is usable whether it was assembled by the factory or constructed directly, with no separate
-    build step to remember. To fail fast at *build* time instead (surfacing a bad engine while the
-    tree is being assembled), override ``_build_children`` to touch ``self.engine``:
-
-        def _build_children(self, factory):
-            _ = self.engine  # construct eagerly during ensure_built()
+    A concrete ``CppComponent`` must be buildable: it either declares ``component=`` /
+    ``component_cls`` or overrides ``_create_component`` — otherwise its class definition raises.
     """
+
+    # The native class this wraps — usually a pybind11 class deriving from ``bausatz::Component``.
+    component_cls: ClassVar[Callable[..., Any] | None] = None
+
+    def __init_subclass__(cls, component: Callable[..., Any] | None = None, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if component is not None:
+            cls.component_cls = component
+        # A concrete (registered) CppComponent must be able to build its native object: either it
+        # has a component_cls, or it overrides _create_component. Abstract intermediates (no pinned
+        # class_name) are exempt.
+        field = cls.Config.model_fields.get(Component.DISCRIMINATOR)
+        is_concrete = field is not None and field.default is not PydanticUndefined
+        overrides_create = cls._create_component is not CppComponent._create_component
+        if is_concrete and cls.component_cls is None and not overrides_create:
+            raise TypeError(
+                f"{cls.__qualname__} is a concrete CppComponent with no native component to build: "
+                f"declare `component=<class>` (or set component_cls), or override _create_component()."
+            )
 
     def __init__(self, config: Component.Config) -> None:
         super().__init__(config)
-        self._engine: Any = _UNSET  # built on first ``engine`` access
+        self._component: Any = _UNSET  # built on first ``component`` access
 
-    @abstractmethod
-    def _make_engine(self) -> Any:
-        """Construct and return the native engine from ``self.config``. Implement in subclasses."""
+    def _component_fields(self) -> dict[str, Any]:
+        """The validated config fields passed as keyword args to ``component_cls``. Defaults to the
+        whole config minus the framework-only ``class_name`` / ``name``; override to rename, filter,
+        or remap fields for the native constructor."""
+        return self.config.model_dump(exclude={Component.DISCRIMINATOR, "name"})
+
+    def _create_component(self) -> Any:
+        """Construct the native component from the config. Default:
+        ``component_cls(**self._component_fields())``, carrying ``config.name`` onto it. Override for
+        custom construction — e.g. a container that builds its child components."""
+        if self.component_cls is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} has no component_cls; declare `component=` or override "
+                f"_create_component()."
+            )
+        component = self.component_cls(**self._component_fields())
+        if self.config.name and hasattr(component, "name"):
+            component.name = self.config.name  # carry the config name onto the native component
+        return component
 
     @property
-    def engine(self) -> Any:
-        """The native engine, built from the config on first access and cached thereafter."""
-        if self._engine is _UNSET:
-            self._engine = self._make_engine()
-        return self._engine
+    def component(self) -> Any:
+        """The native component, built from the config on first access and cached thereafter."""
+        if self._component is _UNSET:
+            self._component = self._create_component()
+        return self._component

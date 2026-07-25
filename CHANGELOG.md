@@ -9,10 +9,13 @@ breaking changes.
 
 ### Added
 
-- **Native (C++) components.** `CppComponent` — a `Component` whose behavior is a native "engine"
-  (typically a [pybind11](https://pybind11.readthedocs.io)-exposed C++ class), built lazily from the
-  validated config and cached. The pydantic `Config` still owns validation, the `class_name` tag,
-  registration, and `to_dict`.
+- **Native (C++) components.** `CppComponent` — a `Component` whose behavior is a native object
+  (typically a [pybind11](https://pybind11.readthedocs.io)-exposed C++ class). It is declarative:
+  name the native class with `class Foo(CppComponent, component=NativeFoo)` and the framework builds
+  it from the validated config, marshalling the config fields in as keyword arguments (override
+  `_create_component` for custom construction, e.g. containers). The native object is built lazily
+  and cached; the pydantic `Config` still owns validation, the `class_name` tag, registration, and
+  `to_dict`.
 - **Shipped C++ headers.** The package now ships a header-only C++ base `bausatz::Component` plus
   pybind11 binding helpers; a downstream extension locates them with `bausatz.get_include()`. A
   worked, compiled example lives in [`examples/pybind`](examples/pybind) (config-struct passing and a

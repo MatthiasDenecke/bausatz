@@ -51,7 +51,7 @@ back to the spec that built it.
 | `Component` | base for buildable classes — declares a typed nested `Config` (pydantic) and self-registers at class-definition time by its `class_name` tag |
 | `ComponentFactory` | `validate(spec)` → a typed `Config` (children resolved), `build(config)` → the instance, and `create = build∘validate` (plus typed `create_as` / `build_as` and `create_many`), recursing into container children; `config_adapter()` builds a pydantic **discriminated union** over every registered Config for one-pass validation of whole trees |
 | `Registry` | the tag → class table; duplicate tags fail loudly |
-| `CppComponent` | a `Component` whose compute is a native (C++) engine built from the validated config — see [Native (C++) components](#native-c-components) |
+| `CppComponent` | a `Component` whose compute is a native (C++) component built from the validated config — see [Native (C++) components](#native-c-components) |
 
 A container's child fields are typed as a `Config` (`list[Retriever.Config]`, `dict[str, Component.Config]`, an optional one, …); `Component.Config` resolves each nested spec into its concrete Config eagerly, in the parent's validation pass — no dedicated child-field type to import.
 
@@ -72,24 +72,28 @@ class MyBase(Component, factory=my_factory):     # the whole subtree registers i
 ## Native (C++) components
 
 A component's behavior can be implemented in C++. `CppComponent` is a `Component` whose compute is a
-native "engine" (typically a [pybind11](https://pybind11.readthedocs.io)-exposed class): the pydantic
-`Config` still does validation, tagging, registration and `to_dict`, while the engine — built from
-the *validated* config — does the work.
+native object (typically a [pybind11](https://pybind11.readthedocs.io)-exposed class): the pydantic
+`Config` still does validation, tagging, registration and `to_dict`, while the native component —
+built from the *validated* config — does the work. It's **declarative** — name the native class with
+`component=` and the framework marshals the config fields in as keyword arguments, so a C++-backed
+component needs no more code than a pure-Python one:
 
 ```python
-class Affine(CppComponent):
+class Affine(CppComponent, component=AffineKernel):   # AffineKernel is a pybind11 class
     class Config(Component.Config):
         class_name: Literal["affine"] = "affine"
         scale: float = 1.0
-    def _make_engine(self):                      # built lazily from the validated config
-        return AffineKernel(self.config.scale)   # a pybind11 extension type
-    def forward(self, x): return self.engine.forward(x)
+        bias: float = 0.0
+    def forward(self, x): return self.component.forward(x)   # self.component is built lazily
 ```
 
-The library ships a C++ base `bausatz::Component` (header-only) so native engines share a polymorphic
-root — enough for a C++ container to run a whole subtree natively. A downstream extension finds the
+`AffineKernel(scale=..., bias=...)` is constructed for you from the config fields; override
+`_create_component` only when construction is custom (e.g. a container that builds child components).
+The library ships a C++ base `bausatz::Component` (header-only) so native components share a
+polymorphic root — enough for a C++ container to run a whole subtree natively. A downstream extension
+finds the
 headers with `bausatz.get_include()`. See [`examples/pybind`](examples/pybind) for a worked, compiled
-example (config-struct passing and a native composite).
+example (a declarative leaf and a native C++ composite).
 
 ## Design notes
 

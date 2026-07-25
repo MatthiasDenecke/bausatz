@@ -1,11 +1,12 @@
-// pybind11 bridge demonstrating three things:
+// pybind11 bridge demonstrating:
 //
 //   1. Using the library's C++ base: bausatz::Component (from <bausatz/component.hpp>, located via
 //      bausatz.get_include()). It has no compute method — the application defines one.
 //   2. An app-level compute interface `Transform : bausatz::Component` (forward lives HERE, not in
 //      the library base), with a leaf (AffineKernel) and a native composite (Sequential) that runs
 //      a whole chain in C++.
-//   3. Config-struct passing: AffineConfig mirrors the pydantic Config as a plain C++ struct.
+//   3. Constructors that take the config fields as keyword arguments, so the Python `CppComponent`
+//      builds them generically from the validated config — no per-field marshalling glue.
 //
 // bausatz::bind_component / bind_component_base (from <bausatz/pybind.hpp>) hide the base +
 // shared_ptr-holder boilerplate.
@@ -30,18 +31,20 @@ public:
     virtual double forward(double x) const = 0;
 };
 
-// (3) Affine-specific config, mirrored as a plain C++ struct. The Python component fills this from
-// its validated pydantic config; the C++ side never sees pydantic.
+// (3) An internal typed config. It is NOT part of the Python boundary — the constructor takes the
+// fields directly, and the Python component marshals its validated config in as keyword arguments.
+// A typed struct like this is still handy for carrying config deep into C++ code.
 struct AffineConfig {
     double scale = 1.0;
     double bias = 0.0;
 };
 
-// A leaf engine: y = scale * x + bias.
+// A leaf component: y = scale * x + bias. Its constructor takes the config fields as keyword arguments
+// (see the binding), so `CppComponent` can build it generically from the pydantic config.
 class AffineKernel : public Transform {
 public:
-    explicit AffineKernel(const AffineConfig &cfg) : cfg_(cfg) {
-        if (cfg.scale == 0.0) {
+    AffineKernel(double scale, double bias) : cfg_{scale, bias} {
+        if (scale == 0.0) {
             // Thrown from C++, surfaced in Python as ValueError (auto-translated by pybind11).
             throw std::invalid_argument("AffineKernel: scale must be non-zero");
         }
@@ -90,18 +93,10 @@ PYBIND11_MODULE(_affine, m) {
         .def("forward", &Transform::forward, py::arg("x"),
              "Run the transform on a single value.");
 
-    // The mirrored config struct (config-struct passing): a typed C++ config built on the Python side.
-    py::class_<AffineConfig>(m, "AffineConfig")
-        .def(py::init<double, double>(), py::arg("scale") = 1.0, py::arg("bias") = 0.0)
-        .def_readwrite("scale", &AffineConfig::scale)
-        .def_readwrite("bias", &AffineConfig::bias)
-        .def("__repr__", [](const AffineConfig &c) {
-            return "AffineConfig(scale=" + std::to_string(c.scale) +
-                   ", bias=" + std::to_string(c.bias) + ")";
-        });
-
+    // AffineKernel's constructor takes the config fields as keyword arguments, so a Python
+    // CppComponent can build it generically by splatting the validated config: AffineKernel(**fields).
     bausatz::bind_component<AffineKernel, Transform>(m, "AffineKernel")
-        .def(py::init<const AffineConfig &>(), py::arg("config"))
+        .def(py::init<double, double>(), py::arg("scale") = 1.0, py::arg("bias") = 0.0)
         .def("forward_many", &AffineKernel::forward_many, py::arg("xs"),
              py::call_guard<py::gil_scoped_release>(),
              "Apply to a batch, looping in C++ with the GIL released.")

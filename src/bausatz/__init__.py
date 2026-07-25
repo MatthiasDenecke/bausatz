@@ -4,7 +4,7 @@ A ``Component`` declares a typed nested ``Config`` and self-registers on import;
 turns a spec into an instance; ``Registry`` is the tag -> class table. See ``component.py`` for the
 registration mechanics.
 
-The library also ships C++ headers for the native-engine bridge (``bausatz::Component``); a
+The library also ships C++ headers for the native-component bridge (``bausatz::Component``); a
 downstream pybind11 extension locates them with ``bausatz.get_include()``.
 """
 
