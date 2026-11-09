@@ -114,6 +114,18 @@ def test_native_sequential_nests():
     assert nested.forward(3.0) == 106.0          # (2*3) then +100
 
 
+def test_native_sequential_constructed_directly_builds_its_stages():
+    # Not through the factory: first access to `component` builds the child stages first, so the
+    # C++ Sequential gets them (rather than being cached with zero stages).
+    seq = NativeSequential(
+        NativeSequential.Config(
+            stages=[{"class_name": "affine", "scale": 2.0}, {"class_name": "affine", "bias": 5.0}]
+        )
+    )
+    assert seq.component.size == 2
+    assert seq.forward(3.0) == 11.0
+
+
 def test_native_sequential_round_trips_through_config():
     spec = {
         "class_name": "native-sequential",

@@ -102,7 +102,14 @@ class CppComponent(Component):
 
     @property
     def component(self) -> Any:
-        """The native component, built from the config on first access and cached thereafter."""
+        """The native component, built from the config on first access and cached thereafter.
+
+        The children are built first (``ensure_built()``, a no-op once the factory has built them).
+        A container constructed directly, not through the factory, therefore still sees its children
+        when ``_create_component`` runs, instead of caching a native object built from none. As a
+        consequence ``_build_children`` must not read ``self.component``: the native object depends
+        on the children, not the other way round."""
         if self._component is _UNSET:
+            self.ensure_built()
             self._component = self._create_component()
         return self._component

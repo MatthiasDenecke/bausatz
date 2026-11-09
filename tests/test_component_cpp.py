@@ -100,6 +100,59 @@ def test_component_fields_hook_can_remap(factory):
     assert factory.create({"class_name": "renamed-stub", "gain": 6.0}).component.scale == 6.0
 
 
+class FakeChain:
+    """Stands in for a native composite (like the example's C++ ``Sequential``)."""
+
+    def __init__(self, stages: list[FakeKernel], name: str = "") -> None:
+        self.stages = list(stages)
+        self.name = name
+
+    def apply(self, x: float) -> float:
+        for stage in self.stages:
+            x = stage.apply(x)
+        return x
+
+
+class Chain(CppComponent):
+    """A container CppComponent: its native object wraps its children's native objects."""
+
+    class Config(Component.Config):
+        class_name: Literal["chain-stub"] = "chain-stub"
+        stages: list[Component.Config]
+
+    config: Chain.Config
+
+    def __init__(self, config: Chain.Config) -> None:
+        super().__init__(config)
+        self.stages: list[Affine] = []
+        self.builds = 0
+
+    def _build_children(self, factory: ComponentFactory) -> None:
+        self.builds += 1
+        self.stages = [factory.build(cfg) for cfg in self.config.stages]
+
+    def _create_component(self) -> FakeChain:
+        return FakeChain([stage.component for stage in self.stages], name=self.config.name or "")
+
+
+def test_directly_constructed_container_builds_its_children_first():
+    # Constructed directly (no factory), first access to `component` builds the children before
+    # creating the native object, instead of caching a native chain with no stages.
+    chain = Chain(Chain.Config(stages=[{"class_name": "affine-stub", "scale": 2.0},
+                                       {"class_name": "affine-stub", "bias": 5.0}]))
+    assert len(chain.component.stages) == 2
+    assert chain.component.apply(3.0) == 11.0  # 2*3, then +5
+    assert chain.builds == 1
+
+
+def test_factory_built_container_does_not_rebuild_its_children(factory):
+    factory.register("chain-stub", Chain)
+    chain = factory.create({"class_name": "chain-stub", "stages": [{"class_name": "affine-stub"}]})
+    assert chain.builds == 1  # built by the factory
+    assert len(chain.component.stages) == 1
+    assert chain.builds == 1  # `component` found them built: ensure_built() was a no-op
+
+
 def test_concrete_component_without_native_class_is_rejected_at_definition():
     # A concrete CppComponent that neither declares `component=` nor overrides _create_component
     # fails when the class is defined — not later, at first use.
