@@ -115,4 +115,16 @@ example (a declarative leaf and a native C++ composite).
 pip install bausatz
 ```
 
+## Development
+
+The package uses a `src/` layout, so the tests run against the *installed* package. Install it in
+editable mode once, which also pulls in the dev tools:
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+The compiled C++ example has its own build and tests; see [`examples/bausatz`](examples/bausatz).
+
 MIT licensed.
