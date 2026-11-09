@@ -8,26 +8,26 @@ on:
     branches-ignore:
       - main
       - develop
-      
+
+# The check reads nothing from the repository, so the job gets no token permissions at all.
+permissions: {}
+
 jobs:
   validate_branch-name:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v5
-
-    - name: Get branch name
-      id: get_branch_name
-      run: echo "name=${{ github.head_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
-
     - name: Validate Branch Name
+      env:
+        # Passed through the environment, never interpolated into the script: a branch name is
+        # attacker-controlled (anyone can open a PR from a fork), and ${{ }} is expanded into the
+        # script text before bash parses it, so a crafted name would run as shell code.
+        BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
       run: |
-        BRANCH_NAME="${{ steps.get_branch_name.outputs.name }}"
         if [[ "$BRANCH_NAME" == "main" || "$BRANCH_NAME" == "develop" || "$BRANCH_NAME" =~ ^feature\/.* || "$BRANCH_NAME" =~ ^refactor\/.* || "$BRANCH_NAME" =~ ^bugfix\/.* ]]; then
           echo "Branch name '$BRANCH_NAME' is valid."
         else
           echo "Error: Branch name '$BRANCH_NAME' does not follow conventions."
-          echo "Branch names must start with 'feature/', 'bugfix/', or be 'main' or 'develop'."
+          echo "Branch names must start with 'feature/', 'refactor/', or 'bugfix/', or be 'main' or 'develop'."
           exit 1
         fi
