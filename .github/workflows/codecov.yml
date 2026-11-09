@@ -1,6 +1,9 @@
 name: Run tests and upload coverage
 
-on: push
+# push: every branch, which keeps the badge and the coverage baseline for main/develop current.
+# pull_request: also tests PRs from forks (a push to a fork doesn't trigger this repo's workflows),
+# and tests the merge result with the base branch rather than just the branch head.
+on: [push, pull_request]
 
 jobs:
   test:
