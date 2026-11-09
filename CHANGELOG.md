@@ -5,6 +5,46 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While on `0.x`, a minor bump may include
 breaking changes.
 
+## [0.3.0] - 2026-11-09
+
+### Changed
+
+- **Breaking:** a `Component.Config` field holding child Configs in a `set`/`frozenset` now raises
+  `TypeError` when the component class is defined. Such fields never worked (unhashable Configs, and
+  `to_dict()` cannot serialize a set of dicts); use `list`/`tuple`.
+- **Breaking:** a `class_name` default that its own `Literal` rejects, or a `Config` that does not
+  subclass `Component.Config`, now raises `TypeError` at class definition (both previously
+  registered and then failed, or silently lost validation, at use).
+- `ComponentFactory.config_adapter()` is a discriminated union even with a single registered
+  class, so a spec without `class_name` is rejected regardless of registry size.
+- The pybind11 helpers' default `__repr__` now lives on `bind_component_base` and uses the
+  instance's Python type name and Python string quoting. A `.def("__repr__", …)` chained on a
+  derived class now replaces it, as documented (previously it was silently ignored).
+- Requires `pydantic>=2.7` (what `to_dict()` already needed; the declared floor was `>=2`).
+
+### Fixed
+
+- Child specs resolve against the Config's own family factory when no factory is passed, so a
+  scoped family's Config validates when constructed directly or through `config_adapter()`.
+- Child validation errors report their full path (e.g. `layers.0.layers.0.p`), and every
+  failing child is reported, not only the first.
+- Child fields may use `Annotated` at any depth, `Sequence`/`Mapping`, and union element types.
+- An unhashable `class_name` raises `UnknownTagError` instead of a raw `TypeError`.
+- Subclassing a concrete component without its own `Config` explains the resulting tag clash.
+- A container `CppComponent` constructed directly builds its children before its native
+  component (it used to cache a native object with no children).
+- `CppComponent._component_fields` no longer re-inserts a `name` excluded from the dump; the
+  README documents that native constructors receive `name`.
+- Example: the native `Sequential` rejects a `None` stage with `ValueError` instead of
+  segfaulting.
+
+### CI
+
+- New job builds the wheel, checks that it bundles the C++ headers, and compiles and tests
+  `examples/bausatz` against it. Tests also run on pull requests. The branch-name check no longer
+  interpolates the branch name into shell.
+```
+
 ## [0.2.0] - 2026-07-25
 
 ### Added

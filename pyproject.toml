@@ -1,6 +1,6 @@
 [project]
 name = "bausatz"
-version = "0.2.0"
+version = "0.3.0"
 description = "Config-driven component trees: pydantic-validated classes that self-register by tag and assemble recursively from plain dict/JSON specs"
 readme = "README.md"
 requires-python = ">=3.12"

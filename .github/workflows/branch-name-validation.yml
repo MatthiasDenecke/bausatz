@@ -24,7 +24,7 @@ jobs:
         # script text before bash parses it, so a crafted name would run as shell code.
         BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
       run: |
-        if [[ "$BRANCH_NAME" == "main" || "$BRANCH_NAME" == "develop" || "$BRANCH_NAME" =~ ^feature\/.* || "$BRANCH_NAME" =~ ^refactor\/.* || "$BRANCH_NAME" =~ ^bugfix\/.* ]]; then
+        if [[ "$BRANCH_NAME" == "main" || "$BRANCH_NAME" == "develop" || "$BRANCH_NAME" =~ ^feature\/.* || "$BRANCH_NAME" =~ ^refactor\/.* || "$BRANCH_NAME" =~ ^bugfix\/.* || "$BRANCH_NAME" =~ ^release\/.* ]]; then
           echo "Branch name '$BRANCH_NAME' is valid."
         else
           echo "Error: Branch name '$BRANCH_NAME' does not follow conventions."
