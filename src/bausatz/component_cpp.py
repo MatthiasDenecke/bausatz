@@ -83,9 +83,11 @@ class CppComponent(Component):
 
         ``name`` is kept: the native component takes its name at construction (``bausatz::Component``
         makes it immutable). Since the config's ``name`` is ``str | None`` while the native side
-        expects a string, ``None`` is normalized to ``""``."""
+        expects a string, ``None`` is normalized to ``""``. A native class that takes no ``name``
+        overrides this method to drop it. (A ``name`` field declared with ``exclude=True`` is not
+        passed either, but that also drops it from ``to_dict()``.)"""
         fields = self.config.model_dump(exclude={Component.DISCRIMINATOR})
-        if fields.get("name") is None:
+        if "name" in fields and fields["name"] is None:
             fields["name"] = ""
         return fields
 

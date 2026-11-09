@@ -100,6 +100,25 @@ def test_component_fields_hook_can_remap(factory):
     assert factory.create({"class_name": "renamed-stub", "gain": 6.0}).component.scale == 6.0
 
 
+def test_name_excluded_from_dump_is_not_passed(factory):
+    # A native class without a `name` parameter: excluding the field from dumps keeps it out of
+    # the constructor kwargs (it used to be re-inserted as "").
+    from pydantic import Field
+
+    class Nameless:
+        def __init__(self, gain: float) -> None:
+            self.gain = gain
+
+    class Gain(CppComponent, component=Nameless):
+        class Config(Component.Config):
+            class_name: Literal["gain-stub"] = "gain-stub"
+            name: str | None = Field(None, exclude=True)
+            gain: float = 1.0
+
+    factory.register("gain-stub", Gain)
+    assert factory.create({"class_name": "gain-stub", "name": "g", "gain": 3.0}).component.gain == 3.0
+
+
 class FakeChain:
     """Stands in for a native composite (like the example's C++ ``Sequential``)."""
 
