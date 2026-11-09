@@ -449,6 +449,23 @@ def test_registry_unknown_tag_raises():
         reg.get("missing")
 
 
+def test_registry_unhashable_tag_is_unknown():
+    # A malformed spec may carry any value as its tag; an unhashable one can't be registered, so it
+    # is reported as unknown rather than leaking a TypeError from the dict lookup.
+    reg = Registry()
+    reg.register("x", Linear)
+    with pytest.raises(UnknownTagError):
+        reg.get(["x"])
+    assert ["x"] not in reg
+
+
+def test_unhashable_class_name_is_an_unknown_tag(factory):
+    with pytest.raises(UnknownTagError):
+        factory.validate({"class_name": ["linear"]})  # root spec
+    with pytest.raises(UnknownTagError):
+        factory.validate({"class_name": "sequential", "layers": [{"class_name": {}}]})  # child spec
+
+
 # --------------------------------------------------------------------------- #
 # Discriminated-union config adapter.
 # --------------------------------------------------------------------------- #
