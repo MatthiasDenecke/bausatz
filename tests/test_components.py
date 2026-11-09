@@ -9,10 +9,11 @@ field (Dropout), and a container that builds nested children (Sequential).
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Mapping, Sequence
+from typing import Annotated, Literal
 
 import pytest
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, ValidationInfo, model_validator
 
 from bausatz import Component, ComponentFactory, Registry
 from bausatz.registry import DuplicateTagError, UnknownTagError
@@ -142,6 +143,50 @@ def test_class_name_without_default_is_rejected():
         class Bad(Component):
             class Config(Component.Config):
                 class_name: Literal["bad"]  # no default -> cannot self-register
+
+
+def test_class_name_default_must_match_its_literal():
+    # pydantic doesn't validate defaults: without this check "bar" would register, then fail
+    # validation on every build.
+    with pytest.raises(TypeError, match=r"defaults to 'bar'.*Literal\['foo'\]"):
+
+        class Mismatched(Component):
+            class Config(Component.Config):
+                class_name: Literal["foo"] = "bar"
+
+    assert "bar" not in ComponentFactory.get().registry
+
+
+def test_config_must_subclass_component_config():
+    from pydantic import BaseModel
+
+    with pytest.raises(TypeError, match="must subclass Component.Config"):
+
+        class Detached(Component):
+            class Config(BaseModel):  # skips Component.Config: no child resolution, no forbid
+                class_name: Literal["detached"] = "detached"
+
+    assert "detached" not in ComponentFactory.get().registry
+
+
+def test_subclassing_a_concrete_component_without_a_config_explains_the_clash():
+    # The subclass inherits Linear.Config and with it the tag 'linear'; the error says so.
+    with pytest.raises(DuplicateTagError, match="declares no Config of its own.*'linear'"):
+
+        class LoudLinear(Linear):
+            pass
+
+
+def test_subclass_inheriting_a_config_may_register_in_another_factory():
+    # Re-scoping such a subclass into another factory is legitimate (no clash there), and the
+    # inherited Config keeps its original owner.
+    other = ComponentFactory(Registry())
+
+    class ExportedLinear(Linear, factory=other):
+        pass
+
+    assert other.registry.get("linear") is ExportedLinear
+    assert Linear.Config._owner is Linear
 
 
 def test_component_without_discriminator_is_abstract():
@@ -356,6 +401,77 @@ def test_dict_and_optional_children_resolve(factory):
     assert factory.validate({"class_name": "router", "routes": {}}).fallback is None
 
 
+def test_annotated_child_fields_resolve(factory):
+    # Annotated (a constraint or description) around a child type, around the field's container,
+    # or around an optional child, at any depth, is unwrapped and the children resolve.
+    class Annotations(Component):
+        class Config(Component.Config):
+            class_name: Literal["annotations"] = "annotations"
+            outer: Annotated[list[Component.Config], Field(min_length=1)]
+            inner: list[Annotated[Component.Config, Field(description="a layer")]] = []
+            maybe: Annotated[Component.Config, Field(description="optional")] | None = None
+
+    factory.register("annotations", Annotations)
+    cfg = factory.validate(
+        {
+            "class_name": "annotations",
+            "outer": [{"class_name": "dropout", "p": 0.1}],
+            "inner": [{"class_name": "linear", "in_features": 1, "out_features": 1}],
+            "maybe": {"class_name": "dropout", "p": 0.2},
+        }
+    )
+    assert isinstance(cfg.outer[0], Dropout.Config)
+    assert isinstance(cfg.inner[0], Linear.Config)
+    assert isinstance(cfg.maybe, Dropout.Config)
+    with pytest.raises(ValidationError):  # the Annotated constraint still applies
+        factory.validate({"class_name": "annotations", "outer": []})
+
+
+def test_abstract_container_child_fields_resolve(factory):
+    # Sequence / Mapping (and their mutable variants) are list- and dict-shaped like list / dict.
+    class Abstract(Component):
+        class Config(Component.Config):
+            class_name: Literal["abstract-containers"] = "abstract-containers"
+            seq: Sequence[Component.Config] = ()
+            named: Mapping[str, Component.Config] = {}
+
+    factory.register("abstract-containers", Abstract)
+    cfg = factory.validate(
+        {
+            "class_name": "abstract-containers",
+            "seq": [{"class_name": "dropout", "p": 0.1}],
+            "named": {"x": {"class_name": "linear", "in_features": 1, "out_features": 1}},
+        }
+    )
+    assert isinstance(cfg.seq[0], Dropout.Config)
+    assert isinstance(cfg.named["x"], Linear.Config)
+    assert factory.create(factory.build(cfg).to_dict()).config == cfg  # round-trips
+
+
+def test_union_element_type_resolves():
+    # A list whose element is a union of family bases resolves its specs too.
+    class Mixed(Component, factory=_family):
+        class Config(Component.Config):
+            class_name: Literal["mixed"] = "mixed"
+            members: list[_Retriever.Config | _Pool.Config]
+
+    cfg = _family.validate(
+        {"class_name": "mixed", "members": [{"class_name": "dense"}, {"class_name": "pool"}]}
+    )
+    assert [type(m) for m in cfg.members] == [_Dense.Config, _Pool.Config]
+
+
+def test_set_of_child_configs_is_rejected_at_definition():
+    # A set can't hold child Configs (unhashable, and to_dict() can't serialize a set of dicts),
+    # so the field is rejected when the class is defined, with a pointer to list / tuple.
+    with pytest.raises(TypeError, match=r"Config\.layers: .*use list\[\.\.\.\] or tuple"):
+
+        class Bag(Component):
+            class Config(Component.Config):
+                class_name: Literal["bag"] = "bag"
+                layers: frozenset[Component.Config]
+
+
 def test_wrong_container_type_for_children_is_rejected(factory):
     # layers is list-shaped; handing it a dict is left for field validation to reject.
     with pytest.raises(ValidationError):
@@ -380,6 +496,79 @@ def test_validate_rejects_malformed_child_eagerly(factory):
                                                      "in_features": 4, "out_features": 2,
                                                      "bogus": 1}]}
         )  # unknown key in child
+
+
+def _error_locs(exc_info: pytest.ExceptionInfo[ValidationError]) -> list[tuple]:
+    return [err["loc"] for err in exc_info.value.errors()]
+
+
+def test_child_validation_errors_carry_their_full_path(factory):
+    # A child's error is reported at its path from the root, not relative to the child.
+    with pytest.raises(ValidationError) as exc_info:
+        factory.validate(
+            {
+                "class_name": "sequential",
+                "layers": [{"class_name": "linear", "in_features": 4, "out_features": 2},
+                           {"class_name": "dropout", "p": 5.0}],
+            }
+        )
+    assert _error_locs(exc_info) == [("layers", 1, "p")]
+    assert exc_info.value.errors()[0]["type"] == "less_than_equal"
+
+
+def test_grandchild_validation_errors_carry_their_full_path(factory):
+    with pytest.raises(ValidationError) as exc_info:
+        factory.validate(
+            {
+                "class_name": "sequential",
+                "layers": [{"class_name": "sequential",
+                            "layers": [{"class_name": "dropout", "p": 5.0}]}],
+            }
+        )
+    assert _error_locs(exc_info) == [("layers", 0, "layers", 0, "p")]
+
+
+def test_every_bad_child_is_reported_with_dict_and_optional_paths(factory):
+    # All failing children are reported together (not just the first), under dict keys and
+    # optional single-child fields as well as list indices.
+    factory.register("router", Router)
+    with pytest.raises(ValidationError) as exc_info:
+        factory.validate(
+            {
+                "class_name": "router",
+                "routes": {"a": {"class_name": "dropout", "p": 0.1},
+                           "b": {"class_name": "linear", "in_features": 4, "bogus": 1}},
+                "fallback": {"class_name": "dropout", "p": -1.0},
+            }
+        )
+    assert sorted(_error_locs(exc_info), key=str) == sorted(
+        [("routes", "b", "out_features"), ("routes", "b", "bogus"), ("fallback", "p")], key=str
+    )
+
+
+def test_custom_child_error_type_is_preserved(factory):
+    from pydantic import field_validator
+    from pydantic_core import PydanticCustomError
+
+    class Picky(Component):
+        class Config(Component.Config):
+            class_name: Literal["picky"] = "picky"
+            level: int = 0
+
+            @field_validator("level")
+            @classmethod
+            def _odd_only(cls, v: int) -> int:
+                if v % 2 == 0:
+                    raise PydanticCustomError("not_odd", "level {level} is not odd", {"level": v})
+                return v
+
+    factory.register("picky", Picky)
+    with pytest.raises(ValidationError) as exc_info:
+        factory.validate({"class_name": "sequential", "layers": [{"class_name": "picky", "level": 2}]})
+    [err] = exc_info.value.errors()
+    assert err["loc"] == ("layers", 0, "level")
+    assert err["type"] == "not_odd" and err["msg"] == "level 2 is not odd"
+    assert err["ctx"] == {"level": 2}
 
 
 def test_build_as_enforces_expected_type(factory):
@@ -449,6 +638,23 @@ def test_registry_unknown_tag_raises():
         reg.get("missing")
 
 
+def test_registry_unhashable_tag_is_unknown():
+    # A malformed spec may carry any value as its tag; an unhashable one can't be registered, so it
+    # is reported as unknown rather than leaking a TypeError from the dict lookup.
+    reg = Registry()
+    reg.register("x", Linear)
+    with pytest.raises(UnknownTagError):
+        reg.get(["x"])
+    assert ["x"] not in reg
+
+
+def test_unhashable_class_name_is_an_unknown_tag(factory):
+    with pytest.raises(UnknownTagError):
+        factory.validate({"class_name": ["linear"]})  # root spec
+    with pytest.raises(UnknownTagError):
+        factory.validate({"class_name": "sequential", "layers": [{"class_name": {}}]})  # child spec
+
+
 # --------------------------------------------------------------------------- #
 # Discriminated-union config adapter.
 # --------------------------------------------------------------------------- #
@@ -470,6 +676,18 @@ def test_config_adapter_single_config_branch():
     f.register("dropout", Dropout)
     parsed = f.config_adapter().validate_python({"class_name": "dropout", "p": 0.25})
     assert isinstance(parsed, Dropout.Config)
+
+
+def test_config_adapter_requires_the_tag_regardless_of_registry_size():
+    # One registered class or many, a spec without class_name is rejected the same way (each
+    # Config defaults its tag, so a plain single-model adapter used to accept it).
+    f = ComponentFactory(Registry())
+    f.register("dropout", Dropout)
+    with pytest.raises(ValidationError, match="union_tag_not_found"):
+        f.config_adapter().validate_python({"p": 0.25})
+    f.register("linear", Linear)
+    with pytest.raises(ValidationError, match="union_tag_not_found"):
+        f.config_adapter().validate_python({"p": 0.25})
 
 
 def test_config_adapter_is_cached_until_registry_grows():
@@ -546,13 +764,15 @@ def test_scoped_container_builds_children_from_its_own_factory():
         def _build_children(self, factory: ComponentFactory) -> None:
             self.child = factory.build(self.config.child)
 
-    # The child spec resolves during validation, so it needs the scoped factory in context (the
-    # global registry has never heard of 'scoped-leaf').
-    cfg = SBox.Config.model_validate(
-        {"class_name": "scoped-box", "child": {"class_name": "scoped-leaf"}},
-        context={"factory": lib},
-    )
+    # The child spec resolves during validation, against the scoped factory (the global registry has
+    # never heard of 'scoped-leaf'). It comes from the context when given, and otherwise from the
+    # family SBox.Config belongs to, so every way of validating the Config resolves the child.
+    spec = {"class_name": "scoped-box", "child": {"class_name": "scoped-leaf"}}
+    cfg = SBox.Config.model_validate(spec, context={"factory": lib})
     assert isinstance(cfg.child, SLeaf.Config)  # eagerly resolved to the concrete Config
+    assert isinstance(SBox.Config.model_validate(spec).child, SLeaf.Config)  # no context
+    assert isinstance(SBox.Config(child={"class_name": "scoped-leaf"}).child, SLeaf.Config)
+    assert isinstance(lib.config_adapter().validate_python(spec).child, SLeaf.Config)
 
     # Constructed DIRECTLY (not via the factory): ensure_built with no factory must fall back to the
     # family's scoped factory to BUILD the component.
@@ -561,6 +781,54 @@ def test_scoped_container_builds_children_from_its_own_factory():
     assert isinstance(box.child, SLeaf)
     assert "scoped-leaf" not in ComponentFactory.get().registry
 
+
+def test_child_specs_resolve_against_the_parents_factory_all_the_way_down():
+    # A whole tree resolves against one registry: the factory a Config falls back to is passed on
+    # to its descendants, so a grandchild resolves where the root did.
+    lib = ComponentFactory()
+
+    class TBase(Component, factory=lib):
+        class Config(Component.Config):
+            pass
+
+    class TLeaf(TBase):
+        class Config(TBase.Config):
+            class_name: Literal["tree-leaf"] = "tree-leaf"
+
+    class TNode(TBase):
+        class Config(TBase.Config):
+            class_name: Literal["tree-node"] = "tree-node"
+            kids: list[TBase.Config] = []
+
+    cfg = TNode.Config(kids=[{"class_name": "tree-node", "kids": [{"class_name": "tree-leaf"}]}])
+    assert isinstance(cfg.kids[0].kids[0], TLeaf.Config)
+
+
+def test_caller_context_is_passed_through_to_children():
+    # Extra keys in the caller's context reach the child validators, and the caller's own
+    # context object is not modified when the factory is filled in.
+    seen: list[object] = []
+
+    class Probe(Component):
+        class Config(Component.Config):
+            class_name: Literal["ctx-probe"] = "ctx-probe"
+
+            @model_validator(mode="after")
+            def _record(self, info: ValidationInfo) -> Probe.Config:
+                seen.append((info.context or {}).get("tenant"))
+                return self
+
+    class Holder(Component):
+        class Config(Component.Config):
+            class_name: Literal["ctx-holder"] = "ctx-holder"
+            child: Component.Config
+
+    context = {"tenant": "acme"}
+    Holder.Config.model_validate(
+        {"class_name": "ctx-holder", "child": {"class_name": "ctx-probe"}}, context=context
+    )
+    assert seen == ["acme"]
+    assert context == {"tenant": "acme"}  # no "factory" key leaked into the caller's dict
 
 # --------------------------------------------------------------------------- #
 # ensure_built: idempotency, exception-safety, cycle detection.               #

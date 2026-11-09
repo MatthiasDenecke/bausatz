@@ -114,6 +114,12 @@ class ComponentFactory:
         Validates a whole nested structure in one pass, with Pydantic routing each
         node by `class_name`. Rebuilt only when the registry changes (keyed on its
         monotonic version, so a clear + re-register can't serve a stale adapter).
+
+        Nested child specs resolve against each Config's home factory (its family's
+        scoped factory, else the global one), so a scoped family needs no extra
+        arguments. A class registered here by hand whose home is a *different* factory
+        resolves its children there unless you pass ``context={"factory": self}``,
+        which is what ``validate()`` does.
         """
         version = self.registry.version
         if self._adapter_cache is not None and self._adapter_cache[0] == version:
@@ -121,11 +127,13 @@ class ComponentFactory:
         configs = [cls.Config for cls in self.registry.classes()]
         if not configs:
             raise ValueError("registry is empty; nothing to validate against")
-        if len(configs) == 1:
-            adapter: TypeAdapter[Any] = TypeAdapter(configs[0])
-        else:
-            union = reduce(or_, configs)  # ConfigA | ConfigB | ... (a discriminated union below)
-            adapter = TypeAdapter(Annotated[union, Field(discriminator=Component.DISCRIMINATOR)])
+        # Discriminated even when only one Config is registered. Every Config defaults its tag, so a
+        # plain single-model adapter would accept a spec with no class_name that the union rejects
+        # as soon as a second class registers.
+        union = reduce(or_, configs)  # ConfigA | ConfigB | ..., or the lone Config
+        adapter: TypeAdapter[Any] = TypeAdapter(
+            Annotated[union, Field(discriminator=Component.DISCRIMINATOR)]
+        )
         self._adapter_cache = (version, adapter)
         return adapter
 

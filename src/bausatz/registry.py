@@ -44,15 +44,20 @@ class Registry[T]:
         self._version += 1
 
     def get(self, tag: str) -> type[T]:
+        # A malformed spec can carry any value as its tag. An unhashable one (a list, a dict) can't
+        # be a key, so it can't be registered either: report it as unknown, not as a TypeError.
         try:
             return self._map[tag]
-        except KeyError:
+        except (KeyError, TypeError):
             raise UnknownTagError(
                 f"unknown tag {tag!r}; registered: {sorted(self._map)}"
             ) from None
 
     def __contains__(self, tag: object) -> bool:
-        return tag in self._map
+        try:
+            return tag in self._map
+        except TypeError:  # unhashable -> can't be registered
+            return False
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._map)
