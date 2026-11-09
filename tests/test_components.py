@@ -145,6 +145,50 @@ def test_class_name_without_default_is_rejected():
                 class_name: Literal["bad"]  # no default -> cannot self-register
 
 
+def test_class_name_default_must_match_its_literal():
+    # pydantic doesn't validate defaults: without this check "bar" would register, then fail
+    # validation on every build.
+    with pytest.raises(TypeError, match=r"defaults to 'bar'.*Literal\['foo'\]"):
+
+        class Mismatched(Component):
+            class Config(Component.Config):
+                class_name: Literal["foo"] = "bar"
+
+    assert "bar" not in ComponentFactory.get().registry
+
+
+def test_config_must_subclass_component_config():
+    from pydantic import BaseModel
+
+    with pytest.raises(TypeError, match="must subclass Component.Config"):
+
+        class Detached(Component):
+            class Config(BaseModel):  # skips Component.Config: no child resolution, no forbid
+                class_name: Literal["detached"] = "detached"
+
+    assert "detached" not in ComponentFactory.get().registry
+
+
+def test_subclassing_a_concrete_component_without_a_config_explains_the_clash():
+    # The subclass inherits Linear.Config and with it the tag 'linear'; the error says so.
+    with pytest.raises(DuplicateTagError, match="declares no Config of its own.*'linear'"):
+
+        class LoudLinear(Linear):
+            pass
+
+
+def test_subclass_inheriting_a_config_may_register_in_another_factory():
+    # Re-scoping such a subclass into another factory is legitimate (no clash there), and the
+    # inherited Config keeps its original owner.
+    other = ComponentFactory(Registry())
+
+    class ExportedLinear(Linear, factory=other):
+        pass
+
+    assert other.registry.get("linear") is ExportedLinear
+    assert Linear.Config._owner is Linear
+
+
 def test_component_without_discriminator_is_abstract():
     # No class_name pinned -> treated as an abstract base, silently not registered.
     class Abstract(Component):

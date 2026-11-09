@@ -40,7 +40,16 @@ from __future__ import annotations
 import types
 from collections import abc
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Union, get_args, get_origin
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    ClassVar,
+    Literal,
+    Union,
+    get_args,
+    get_origin,
+)
 
 from pydantic import (
     BaseModel,
@@ -51,6 +60,8 @@ from pydantic import (
 )
 from pydantic_core import InitErrorDetails, PydanticCustomError, PydanticUndefined
 from pydantic_core.core_schema import ErrorType
+
+from bausatz.registry import DuplicateTagError
 
 if TYPE_CHECKING:
     from bausatz.component_factory import ComponentFactory
@@ -124,23 +135,51 @@ class Component:
         super().__init_subclass__(**kwargs)
         if factory is not None:
             cls._factory = factory  # inherited by the subtree (a deeper subclass may re-scope)
-        if "_owner" not in vars(cls.Config):
+        config_cls = cls.Config
+        if not (isinstance(config_cls, type) and issubclass(config_cls, Component.Config)):
+            # Child resolution, extra="forbid" and the child-field typing all live on
+            # Component.Config; a Config that skips it would register but silently lose them.
+            raise TypeError(
+                f"{cls.__qualname__}.Config must subclass Component.Config (or a family base's "
+                f"Config), not {config_cls!r}"
+            )
+        if "_owner" not in vars(config_cls):
             # The first component to declare this Config owns it. A subclass that inherits its
             # parent's Config leaves the parent as the owner.
-            cls.Config._owner = cls
+            config_cls._owner = cls
         # Reject an unsupported child-field shape (a set of Configs) when the class is defined, not
         # at its first validation. Not cached: a forward reference may not be resolved yet.
-        _classify_fields(cls.Config)
-        field = cls.Config.model_fields.get(cls.DISCRIMINATOR)
+        _classify_fields(config_cls)
+        field = config_cls.model_fields.get(cls.DISCRIMINATOR)
         if field is None:
             return  # no discriminator pinned -> abstract base, not registered
-        if field.default is PydanticUndefined:
-            tag = cls.__name__.lower()
+        tag = field.default
+        if tag is PydanticUndefined:
+            example = cls.__name__.lower()
             raise TypeError(
                 f"{cls.__qualname__}.Config.{cls.DISCRIMINATOR} needs a default, e.g. "
-                f'{cls.DISCRIMINATOR}: Literal["{tag}"] = "{tag}"'
+                f'{cls.DISCRIMINATOR}: Literal["{example}"] = "{example}"'
             )
-        cls._home_factory().register(field.default, cls)
+        # pydantic doesn't validate defaults, so a default its own Literal rejects would register a
+        # tag that then fails validation on every build. Catch the mismatch here.
+        allowed = get_args(field.annotation) if get_origin(field.annotation) is Literal else None
+        if allowed is not None and tag not in allowed:
+            raise TypeError(
+                f"{cls.__qualname__}.Config.{cls.DISCRIMINATOR} defaults to {tag!r}, which its "
+                f"annotation Literal[{', '.join(map(repr, allowed))}] rejects; make them match"
+            )
+        try:
+            cls._home_factory().register(tag, cls)
+        except DuplicateTagError as exc:
+            if "Config" in vars(cls):
+                raise
+            # The usual cause: subclassing a concrete component without declaring a Config, so the
+            # subclass inherits the parent's tag too. Say so instead of only naming the clash.
+            raise DuplicateTagError(
+                f"{exc}. {cls.__qualname__} declares no Config of its own, so it inherits "
+                f"{config_cls.__qualname__} and its tag {tag!r}; give it its own Config with a "
+                f"distinct {cls.DISCRIMINATOR}"
+            ) from None
 
     @classmethod
     def _home_factory(cls) -> ComponentFactory:
