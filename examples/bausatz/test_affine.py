@@ -32,6 +32,24 @@ def test_kernel_ctor_takes_config_fields_and_name_as_kwargs():
     assert repr(AffineKernel(scale=1.0)) == "AffineKernel()"
 
 
+def test_default_repr_uses_the_runtime_type_and_quotes_the_name():
+    class Tagged(AffineKernel):  # a Python subclass reports its own type name
+        pass
+
+    assert repr(Tagged(scale=1.0, name="t")) == "Tagged(name='t')"
+    assert repr(AffineKernel(scale=1.0, name="it's")) == 'AffineKernel(name="it\'s")'  # Python repr
+
+
+def test_chained_repr_def_replaces_the_default():
+    # Sequential's binding chains its own .def("__repr__", ...); it must win over the default the
+    # base binding supplies (pybind11 would only append an overload if the default sat on the
+    # same class).
+    from affine._affine import Sequential
+
+    assert repr(Sequential([AffineKernel(scale=1.0)])) == "Sequential(size=1)"
+    assert repr(Sequential([], name="s")) == "Sequential(name='s', size=0)"
+
+
 def test_forward_lives_on_the_app_interface_not_the_library_base():
     # bausatz::Component (the library base) carries no compute method; the example's Transform does.
     assert issubclass(Transform, NativeComponent)
@@ -112,6 +130,27 @@ def test_native_sequential_nests():
         }
     )
     assert nested.forward(3.0) == 106.0          # (2*3) then +100
+
+
+def test_native_sequential_rejects_a_none_stage():
+    # pybind11 turns None into a null shared_ptr; the C++ ctor rejects it (ValueError), so
+    # forward() can never dereference a null stage (it used to segfault).
+    from affine._affine import Sequential
+
+    with pytest.raises(ValueError, match=r"stages\[1\] is None"):
+        Sequential([AffineKernel(scale=1.0), None])
+
+
+def test_native_sequential_constructed_directly_builds_its_stages():
+    # Not through the factory: first access to `component` builds the child stages first, so the
+    # C++ Sequential gets them (rather than being cached with zero stages).
+    seq = NativeSequential(
+        NativeSequential.Config(
+            stages=[{"class_name": "affine", "scale": 2.0}, {"class_name": "affine", "bias": 5.0}]
+        )
+    )
+    assert seq.component.size == 2
+    assert seq.forward(3.0) == 11.0
 
 
 def test_native_sequential_round_trips_through_config():

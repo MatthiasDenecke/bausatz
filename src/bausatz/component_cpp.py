@@ -83,9 +83,11 @@ class CppComponent(Component):
 
         ``name`` is kept: the native component takes its name at construction (``bausatz::Component``
         makes it immutable). Since the config's ``name`` is ``str | None`` while the native side
-        expects a string, ``None`` is normalized to ``""``."""
+        expects a string, ``None`` is normalized to ``""``. A native class that takes no ``name``
+        overrides this method to drop it. (A ``name`` field declared with ``exclude=True`` is not
+        passed either, but that also drops it from ``to_dict()``.)"""
         fields = self.config.model_dump(exclude={Component.DISCRIMINATOR})
-        if fields.get("name") is None:
+        if "name" in fields and fields["name"] is None:
             fields["name"] = ""
         return fields
 
@@ -102,7 +104,14 @@ class CppComponent(Component):
 
     @property
     def component(self) -> Any:
-        """The native component, built from the config on first access and cached thereafter."""
+        """The native component, built from the config on first access and cached thereafter.
+
+        The children are built first (``ensure_built()``, a no-op once the factory has built them).
+        A container constructed directly, not through the factory, therefore still sees its children
+        when ``_create_component`` runs, instead of caching a native object built from none. As a
+        consequence ``_build_children`` must not read ``self.component``: the native object depends
+        on the children, not the other way round."""
         if self._component is _UNSET:
+            self.ensure_built()
             self._component = self._create_component()
         return self._component

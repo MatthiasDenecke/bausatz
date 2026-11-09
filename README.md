@@ -87,8 +87,12 @@ class Affine(CppComponent, component=AffineKernel):   # AffineKernel is a pybind
     def forward(self, x): return self.component.forward(x)   # self.component is built lazily
 ```
 
-`AffineKernel(scale=..., bias=...)` is constructed for you from the config fields; override
-`_create_component` only when construction is custom (e.g. a container that builds child components).
+`AffineKernel(scale=..., bias=..., name=...)` is constructed for you from the config fields. The
+native constructor therefore has to accept every config field as a keyword argument, **including
+`name`**. Every `Config` has a `name` field, and the native `bausatz::Component` takes it at
+construction; `None` is passed as `""`. If the names don't line up, or the native class takes no
+`name`, override `_component_fields` to rename or drop fields. Override `_create_component` only when
+construction is custom (e.g. a container that builds child components).
 The library ships a C++ base `bausatz::Component` (header-only) so native components share a
 polymorphic root — enough for a C++ container to run a whole subtree natively. A downstream extension
 finds the
