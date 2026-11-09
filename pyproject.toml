@@ -17,7 +17,7 @@ classifiers = [
     "Typing :: Typed",
     "Operating System :: OS Independent",
 ]
-dependencies = ["pydantic>=2"]
+dependencies = ["pydantic>=2.7"]  # 2.7: model_dump(serialize_as_any=...), used by to_dict()
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff"]

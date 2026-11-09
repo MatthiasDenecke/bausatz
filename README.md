@@ -107,7 +107,7 @@ example (a declarative leaf and a native C++ composite).
   recursive pass.
 - **Import = register**: a component must be imported before a spec can name it (package
   `__init__`s that import their members are the idiomatic registration point).
-- Zero dependencies beyond **pydantic v2**. Python ≥ 3.12. Fully typed (`py.typed`).
+- Zero dependencies beyond **pydantic v2** (≥ 2.7). Python ≥ 3.12. Fully typed (`py.typed`).
 
 ## Install
 
