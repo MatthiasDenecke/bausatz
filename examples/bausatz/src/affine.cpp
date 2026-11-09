@@ -73,7 +73,15 @@ private:
 class Sequential : public Transform {
 public:
     Sequential(std::vector<std::shared_ptr<Transform>> stages, std::string name)
-        : Transform(std::move(name)), stages_(std::move(stages)) {}
+        : Transform(std::move(name)), stages_(std::move(stages)) {
+        // pybind11 converts a Python None in the list to a null shared_ptr. Reject it here, where it
+        // surfaces as a Python ValueError, rather than dereference it in forward() and crash.
+        for (std::size_t i = 0; i < stages_.size(); ++i) {
+            if (!stages_[i]) {
+                throw std::invalid_argument("Sequential: stages[" + std::to_string(i) + "] is None");
+            }
+        }
+    }
 
     double forward(double x) const override {
         for (const auto &stage : stages_) x = stage->forward(x);

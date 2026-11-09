@@ -114,6 +114,15 @@ def test_native_sequential_nests():
     assert nested.forward(3.0) == 106.0          # (2*3) then +100
 
 
+def test_native_sequential_rejects_a_none_stage():
+    # pybind11 turns None into a null shared_ptr; the C++ ctor rejects it (ValueError), so
+    # forward() can never dereference a null stage (it used to segfault).
+    from affine._affine import Sequential
+
+    with pytest.raises(ValueError, match=r"stages\[1\] is None"):
+        Sequential([AffineKernel(scale=1.0), None])
+
+
 def test_native_sequential_constructed_directly_builds_its_stages():
     # Not through the factory: first access to `component` builds the child stages first, so the
     # C++ Sequential gets them (rather than being cached with zero stages).
