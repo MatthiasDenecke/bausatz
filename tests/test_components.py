@@ -382,6 +382,79 @@ def test_validate_rejects_malformed_child_eagerly(factory):
         )  # unknown key in child
 
 
+def _error_locs(exc_info: pytest.ExceptionInfo[ValidationError]) -> list[tuple]:
+    return [err["loc"] for err in exc_info.value.errors()]
+
+
+def test_child_validation_errors_carry_their_full_path(factory):
+    # A child's error is reported at its path from the root, not relative to the child.
+    with pytest.raises(ValidationError) as exc_info:
+        factory.validate(
+            {
+                "class_name": "sequential",
+                "layers": [{"class_name": "linear", "in_features": 4, "out_features": 2},
+                           {"class_name": "dropout", "p": 5.0}],
+            }
+        )
+    assert _error_locs(exc_info) == [("layers", 1, "p")]
+    assert exc_info.value.errors()[0]["type"] == "less_than_equal"
+
+
+def test_grandchild_validation_errors_carry_their_full_path(factory):
+    with pytest.raises(ValidationError) as exc_info:
+        factory.validate(
+            {
+                "class_name": "sequential",
+                "layers": [{"class_name": "sequential",
+                            "layers": [{"class_name": "dropout", "p": 5.0}]}],
+            }
+        )
+    assert _error_locs(exc_info) == [("layers", 0, "layers", 0, "p")]
+
+
+def test_every_bad_child_is_reported_with_dict_and_optional_paths(factory):
+    # All failing children are reported together (not just the first), under dict keys and
+    # optional single-child fields as well as list indices.
+    factory.register("router", Router)
+    with pytest.raises(ValidationError) as exc_info:
+        factory.validate(
+            {
+                "class_name": "router",
+                "routes": {"a": {"class_name": "dropout", "p": 0.1},
+                           "b": {"class_name": "linear", "in_features": 4, "bogus": 1}},
+                "fallback": {"class_name": "dropout", "p": -1.0},
+            }
+        )
+    assert sorted(_error_locs(exc_info), key=str) == sorted(
+        [("routes", "b", "out_features"), ("routes", "b", "bogus"), ("fallback", "p")], key=str
+    )
+
+
+def test_custom_child_error_type_is_preserved(factory):
+    from pydantic import field_validator
+    from pydantic_core import PydanticCustomError
+
+    class Picky(Component):
+        class Config(Component.Config):
+            class_name: Literal["picky"] = "picky"
+            level: int = 0
+
+            @field_validator("level")
+            @classmethod
+            def _odd_only(cls, v: int) -> int:
+                if v % 2 == 0:
+                    raise PydanticCustomError("not_odd", "level {level} is not odd", {"level": v})
+                return v
+
+    factory.register("picky", Picky)
+    with pytest.raises(ValidationError) as exc_info:
+        factory.validate({"class_name": "sequential", "layers": [{"class_name": "picky", "level": 2}]})
+    [err] = exc_info.value.errors()
+    assert err["loc"] == ("layers", 0, "level")
+    assert err["type"] == "not_odd" and err["msg"] == "level 2 is not odd"
+    assert err["ctx"] == {"level": 2}
+
+
 def test_build_as_enforces_expected_type(factory):
     cfg = factory.validate({"class_name": "linear", "in_features": 4, "out_features": 2})
     assert isinstance(factory.build_as(cfg, Linear), Linear)  # ok

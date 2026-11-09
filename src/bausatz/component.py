@@ -41,8 +41,15 @@ import types
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Union, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, ValidationInfo, model_validator
-from pydantic_core import PydanticUndefined
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    ValidationError,
+    ValidationInfo,
+    model_validator,
+)
+from pydantic_core import InitErrorDetails, PydanticCustomError, PydanticUndefined
+from pydantic_core.core_schema import ErrorType
 
 if TYPE_CHECKING:
     from bausatz.component_factory import ComponentFactory
@@ -89,10 +96,18 @@ class Component:
             if not child_fields:
                 return data
             context = _resolution_context(cls, info)
+            errors: list[InitErrorDetails] = []
             patched = dict(data)
             for field_name, shape in child_fields.items():
                 if field_name in patched:
-                    patched[field_name] = _resolve_child(patched[field_name], shape, context)
+                    patched[field_name] = _resolve_child(
+                        patched[field_name], shape, (field_name,), context, errors
+                    )
+            if errors:
+                # Raised from inside this validator, these line errors are merged into the outer
+                # ValidationError at this Config's own location. Their locs are relative to this
+                # Config (e.g. ('layers', 1, 'p')), so each one reads as the full path from the root.
+                raise ValidationError.from_exception_data(cls.__name__, errors)
             return patched
 
     # Narrowed in subclasses (`config: Linear.Config`) purely for type checkers.
@@ -253,22 +268,61 @@ def _resolution_context(config_cls: type[Component.Config], info: ValidationInfo
     return {**(context or {}), "factory": factory}
 
 
-def _resolve_one(value: Any, context: Any) -> Any:
-    """Resolve a single child spec dict into its concrete Config; pass anything else through."""
+def _resolve_one(
+    value: Any, loc: tuple[str | int, ...], context: Any, errors: list[InitErrorDetails]
+) -> Any:
+    """Resolve a single child spec dict into its concrete Config; pass anything else through.
+
+    A child that fails validation is not raised on the spot. Its errors are collected into
+    ``errors``, relocated under ``loc`` (the child's position in the parent), so every bad child of
+    a Config is reported together, each at its full path."""
     if isinstance(value, Component.Config) or not isinstance(value, Mapping):
         return value
     if Component.DISCRIMINATOR not in value:
         return value  # let the field's own validation raise against the missing discriminator
     klass = context["factory"].registry.get(value[Component.DISCRIMINATOR])
-    # Thread the same context down so deeper descendants resolve against the same factory.
-    return klass.Config.model_validate(dict(value), context=context)
+    try:
+        # Thread the same context down so deeper descendants resolve against the same factory.
+        return klass.Config.model_validate(dict(value), context=context)
+    except ValidationError as exc:
+        errors.extend(_relocated(exc, loc))
+        return value
 
 
-def _resolve_child(value: Any, shape: str, context: Any) -> Any:
+def _resolve_child(
+    value: Any,
+    shape: str,
+    loc: tuple[str | int, ...],
+    context: Any,
+    errors: list[InitErrorDetails],
+) -> Any:
     if shape == "list" and isinstance(value, (list, tuple, set, frozenset)):
-        return [_resolve_one(v, context) for v in value]
+        return [_resolve_one(v, (*loc, i), context, errors) for i, v in enumerate(value)]
     if shape == "dict" and isinstance(value, Mapping):
-        return {k: _resolve_one(v, context) for k, v in value.items()}
+        return {k: _resolve_one(v, (*loc, k), context, errors) for k, v in value.items()}
     if shape == "one":
-        return _resolve_one(value, context)
+        return _resolve_one(value, loc, context, errors)
     return value  # wrong container type for the shape: let field validation report it
+
+
+# The error types pydantic-core can rebuild by name. Any other type came from a user's
+# PydanticCustomError and is rebuilt as one.
+_KNOWN_ERROR_TYPES = frozenset(get_args(ErrorType))
+
+
+def _relocated(exc: ValidationError, prefix: tuple[str | int, ...]) -> list[InitErrorDetails]:
+    """``exc``'s line errors, each with ``prefix`` prepended to its location and otherwise
+    unchanged: same type, message, input and context."""
+    relocated: list[InitErrorDetails] = []
+    for err in exc.errors(include_url=False):
+        loc = (*prefix, *err["loc"])
+        ctx = err.get("ctx")
+        if err["type"] in _KNOWN_ERROR_TYPES:
+            detail = InitErrorDetails(type=err["type"], loc=loc, input=err["input"])
+            if ctx is not None:
+                detail["ctx"] = ctx
+        else:
+            custom = PydanticCustomError(err["type"], err["msg"], ctx)
+            detail = InitErrorDetails(type=custom, loc=loc, input=err["input"])
+        relocated.append(detail)
+    return relocated
