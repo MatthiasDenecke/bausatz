@@ -127,11 +127,13 @@ class ComponentFactory:
         configs = [cls.Config for cls in self.registry.classes()]
         if not configs:
             raise ValueError("registry is empty; nothing to validate against")
-        if len(configs) == 1:
-            adapter: TypeAdapter[Any] = TypeAdapter(configs[0])
-        else:
-            union = reduce(or_, configs)  # ConfigA | ConfigB | ... (a discriminated union below)
-            adapter = TypeAdapter(Annotated[union, Field(discriminator=Component.DISCRIMINATOR)])
+        # Discriminated even when only one Config is registered. Every Config defaults its tag, so a
+        # plain single-model adapter would accept a spec with no class_name that the union rejects
+        # as soon as a second class registers.
+        union = reduce(or_, configs)  # ConfigA | ConfigB | ..., or the lone Config
+        adapter: TypeAdapter[Any] = TypeAdapter(
+            Annotated[union, Field(discriminator=Component.DISCRIMINATOR)]
+        )
         self._adapter_cache = (version, adapter)
         return adapter
 

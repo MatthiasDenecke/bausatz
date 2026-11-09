@@ -678,6 +678,18 @@ def test_config_adapter_single_config_branch():
     assert isinstance(parsed, Dropout.Config)
 
 
+def test_config_adapter_requires_the_tag_regardless_of_registry_size():
+    # One registered class or many, a spec without class_name is rejected the same way (each
+    # Config defaults its tag, so a plain single-model adapter used to accept it).
+    f = ComponentFactory(Registry())
+    f.register("dropout", Dropout)
+    with pytest.raises(ValidationError, match="union_tag_not_found"):
+        f.config_adapter().validate_python({"p": 0.25})
+    f.register("linear", Linear)
+    with pytest.raises(ValidationError, match="union_tag_not_found"):
+        f.config_adapter().validate_python({"p": 0.25})
+
+
 def test_config_adapter_is_cached_until_registry_grows():
     f = ComponentFactory(Registry())
     f.register("dropout", Dropout)
