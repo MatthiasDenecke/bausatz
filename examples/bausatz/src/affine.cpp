@@ -10,7 +10,8 @@
 //      `CppComponent` builds them generically from the validated config — no per-field marshalling.
 //
 // Boilerplate stays small: bausatz::bind_component / bind_component_base (from <bausatz/pybind.hpp>)
-// hide the base + shared_ptr-holder wiring and supply a default __repr__; the batched `forward_many`
+// hide the base + shared_ptr-holder wiring, and the base supplies a default __repr__ that a class
+// can replace with its own `.def("__repr__", ...)` (Sequential does). The batched `forward_many`
 // lives once on Transform, not on every leaf.
 
 #include <pybind11/pybind11.h>
@@ -98,8 +99,8 @@ PYBIND11_MODULE(_affine, m) {
     m.doc() = "pybind11 bridge over the bausatz::Component base: an app Transform interface, a leaf "
               "kernel, and a native composite";
 
-    // Register the library base (exposes the read-only `name`) and the app's compute interface. Each
-    // bind_component call also supplies a default __repr__, so no per-class repr code below.
+    // Register the library base (exposes the read-only `name` and a default __repr__ every class
+    // inherits) and the app's compute interface. Only Sequential overrides the default repr below.
     bausatz::bind_component_base(m);
     bausatz::bind_component<Transform>(m, "Transform")
         .def("forward", &Transform::forward, py::arg("x"), "Run the transform on a single value.")
@@ -115,5 +116,11 @@ PYBIND11_MODULE(_affine, m) {
         // Python list[Transform] -> std::vector<std::shared_ptr<Transform>> via stl.h.
         .def(py::init<std::vector<std::shared_ptr<Transform>>, std::string>(),
              py::arg("stages"), py::arg("name") = "")
-        .def_property_readonly("size", &Sequential::size);
+        .def_property_readonly("size", &Sequential::size)
+        // Replaces the default __repr__ inherited from the base binding.
+        .def("__repr__", [](const Sequential &s) {
+            std::string r = "Sequential(";
+            if (!s.name().empty()) r += "name=" + py::repr(py::str(s.name())).cast<std::string>() + ", ";
+            return r + "size=" + std::to_string(s.size()) + ")";
+        });
 }

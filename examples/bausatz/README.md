@@ -64,8 +64,10 @@ Or install it as a package: `pip install --no-build-isolation .`
 
 - **`bausatz::bind_component<AffineKernel, Transform>(m, "AffineKernel")`** (from `<bausatz/pybind.hpp>`)
   — the library's helper for `py::class_<T, Base, std::shared_ptr<T>>`: records the base and a
-  shared-ownership holder so instances upcast to `shared_ptr<Transform>` when handed to `Sequential`,
-  and supplies a default `__repr__` (so there are no per-class repr lambdas).
+  shared-ownership holder so instances upcast to `shared_ptr<Transform>` when handed to `Sequential`.
+  Every class inherits a default `__repr__` from `bind_component_base`, so there are no per-class
+  repr lambdas. A class that wants its own just chains `.def("__repr__", …)`, which replaces the
+  default; `Sequential` does this to show its size.
 - **Keyword-argument constructors** (`py::arg("scale")`, `py::arg("bias")`, `py::arg("name")`) — let
   `CppComponent` build the native object generically by splatting the validated config:
   `AffineKernel(**fields)`. The batched `forward_many` lives once on `Transform`, not per leaf.
