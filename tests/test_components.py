@@ -9,7 +9,8 @@ field (Dropout), and a container that builds nested children (Sequential).
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Mapping, Sequence
+from typing import Annotated, Literal
 
 import pytest
 from pydantic import Field, ValidationError, ValidationInfo, model_validator
@@ -354,6 +355,77 @@ def test_dict_and_optional_children_resolve(factory):
 
     # An omitted optional child stays None.
     assert factory.validate({"class_name": "router", "routes": {}}).fallback is None
+
+
+def test_annotated_child_fields_resolve(factory):
+    # Annotated (a constraint or description) around a child type, around the field's container,
+    # or around an optional child, at any depth, is unwrapped and the children resolve.
+    class Annotations(Component):
+        class Config(Component.Config):
+            class_name: Literal["annotations"] = "annotations"
+            outer: Annotated[list[Component.Config], Field(min_length=1)]
+            inner: list[Annotated[Component.Config, Field(description="a layer")]] = []
+            maybe: Annotated[Component.Config, Field(description="optional")] | None = None
+
+    factory.register("annotations", Annotations)
+    cfg = factory.validate(
+        {
+            "class_name": "annotations",
+            "outer": [{"class_name": "dropout", "p": 0.1}],
+            "inner": [{"class_name": "linear", "in_features": 1, "out_features": 1}],
+            "maybe": {"class_name": "dropout", "p": 0.2},
+        }
+    )
+    assert isinstance(cfg.outer[0], Dropout.Config)
+    assert isinstance(cfg.inner[0], Linear.Config)
+    assert isinstance(cfg.maybe, Dropout.Config)
+    with pytest.raises(ValidationError):  # the Annotated constraint still applies
+        factory.validate({"class_name": "annotations", "outer": []})
+
+
+def test_abstract_container_child_fields_resolve(factory):
+    # Sequence / Mapping (and their mutable variants) are list- and dict-shaped like list / dict.
+    class Abstract(Component):
+        class Config(Component.Config):
+            class_name: Literal["abstract-containers"] = "abstract-containers"
+            seq: Sequence[Component.Config] = ()
+            named: Mapping[str, Component.Config] = {}
+
+    factory.register("abstract-containers", Abstract)
+    cfg = factory.validate(
+        {
+            "class_name": "abstract-containers",
+            "seq": [{"class_name": "dropout", "p": 0.1}],
+            "named": {"x": {"class_name": "linear", "in_features": 1, "out_features": 1}},
+        }
+    )
+    assert isinstance(cfg.seq[0], Dropout.Config)
+    assert isinstance(cfg.named["x"], Linear.Config)
+    assert factory.create(factory.build(cfg).to_dict()).config == cfg  # round-trips
+
+
+def test_union_element_type_resolves():
+    # A list whose element is a union of family bases resolves its specs too.
+    class Mixed(Component, factory=_family):
+        class Config(Component.Config):
+            class_name: Literal["mixed"] = "mixed"
+            members: list[_Retriever.Config | _Pool.Config]
+
+    cfg = _family.validate(
+        {"class_name": "mixed", "members": [{"class_name": "dense"}, {"class_name": "pool"}]}
+    )
+    assert [type(m) for m in cfg.members] == [_Dense.Config, _Pool.Config]
+
+
+def test_set_of_child_configs_is_rejected_at_definition():
+    # A set can't hold child Configs (unhashable, and to_dict() can't serialize a set of dicts),
+    # so the field is rejected when the class is defined, with a pointer to list / tuple.
+    with pytest.raises(TypeError, match=r"Config\.layers: .*use list\[\.\.\.\] or tuple"):
+
+        class Bag(Component):
+            class Config(Component.Config):
+                class_name: Literal["bag"] = "bag"
+                layers: frozenset[Component.Config]
 
 
 def test_wrong_container_type_for_children_is_rejected(factory):

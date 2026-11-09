@@ -38,8 +38,9 @@ different family.
 from __future__ import annotations
 
 import types
+from collections import abc
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Union, get_args, get_origin
 
 from pydantic import (
     BaseModel,
@@ -127,6 +128,9 @@ class Component:
             # The first component to declare this Config owns it. A subclass that inherits its
             # parent's Config leaves the parent as the owner.
             cls.Config._owner = cls
+        # Reject an unsupported child-field shape (a set of Configs) when the class is defined, not
+        # at its first validation. Not cached: a forward reference may not be resolved yet.
+        _classify_fields(cls.Config)
         field = cls.Config.model_fields.get(cls.DISCRIMINATOR)
         if field is None:
             return  # no discriminator pinned -> abstract base, not registered
@@ -214,14 +218,28 @@ def _is_config_type(tp: Any) -> bool:
     return isinstance(tp, type) and issubclass(tp, Component.Config)
 
 
+# The containers a child field may hold its Configs in. The ``typing`` aliases (``List``,
+# ``Sequence``, ``Dict``, ``Mapping``, …) report these same origins.
+_LIST_ORIGINS = (list, tuple, abc.Sequence, abc.MutableSequence)
+_DICT_ORIGINS = (dict, abc.Mapping, abc.MutableMapping)
+# Sets can't hold child Configs. A Config is unhashable unless frozen, and even a frozen one breaks
+# ``to_dict()``, which would have to build a set of dicts. Such a field is rejected (TypeError).
+_SET_ORIGINS = (set, frozenset, abc.Set, abc.MutableSet)
+
+
 def _classify_child_field(annotation: Any) -> str | None:
     """Return how a field holds child Configs — ``"one"`` / ``"list"`` / ``"dict"`` — or ``None``.
 
-    Understands a bare ``Component.Config`` (subclass), ``list[...]``/``set``/``tuple`` and
-    ``dict[K, ...]`` of them, and those wrapped in ``Optional`` / ``X | None``."""
+    Understands a ``Component.Config`` (subclass); a ``list``/``tuple``/``Sequence`` of them; a
+    ``dict``/``Mapping`` with them as values; and any of these wrapped in ``Optional``,
+    ``X | None`` or ``Annotated[...]``. The element type may be wrapped the same way, as in
+    ``list[Annotated[A.Config, ...]]`` or ``list[A.Config | B.Config]``. A set of child Configs
+    raises ``TypeError`` (see ``_SET_ORIGINS``)."""
     origin = get_origin(annotation)
     if origin is None:
         return "one" if _is_config_type(annotation) else None
+    if origin is Annotated:
+        return _classify_child_field(get_args(annotation)[0])
     if origin is Union or origin is types.UnionType:
         for arg in get_args(annotation):
             if arg is type(None):
@@ -230,24 +248,43 @@ def _classify_child_field(annotation: Any) -> str | None:
             if shape:
                 return shape
         return None
-    if origin in (list, set, frozenset, tuple):
-        args = get_args(annotation)
-        return "list" if args and _is_config_type(args[0]) else None
-    if origin is dict:
-        args = get_args(annotation)
-        return "dict" if len(args) == 2 and _is_config_type(args[1]) else None
+    args = get_args(annotation)
+    if origin in _LIST_ORIGINS:
+        return "list" if any(_is_single_child(arg) for arg in args) else None
+    if origin in _DICT_ORIGINS:
+        return "dict" if len(args) == 2 and _is_single_child(args[1]) else None
+    if origin in _SET_ORIGINS and args and _is_single_child(args[0]):
+        raise TypeError(
+            "child Configs can't be held in a set (a Config is unhashable, and to_dict() can't "
+            "serialize a set of dicts); use list[...] or tuple[...] instead"
+        )
     return None
 
 
-def _child_config_fields(config_cls: type) -> dict[str, str]:
+def _is_single_child(tp: Any) -> bool:
+    """Whether ``tp`` holds exactly one child Config, possibly wrapped in a union or ``Annotated``."""
+    return _classify_child_field(tp) == "one"
+
+
+def _classify_fields(config_cls: type[Component.Config]) -> dict[str, str]:
+    """``{field_name: shape}`` for the fields of ``config_cls`` that hold child Configs."""
+    shapes: dict[str, str] = {}
+    for name, field in config_cls.model_fields.items():
+        try:
+            shape = _classify_child_field(field.annotation)
+        except TypeError as exc:
+            raise TypeError(f"{config_cls.__qualname__}.{name}: {exc}") from None
+        if shape is not None:
+            shapes[name] = shape
+    return shapes
+
+
+def _child_config_fields(config_cls: type[Component.Config]) -> dict[str, str]:
+    """``_classify_fields``, cached per Config class. It is first called during validation, when
+    pydantic has resolved every annotation, so a forward reference can't be cached half-resolved."""
     cached = _CHILD_FIELDS.get(config_cls)
     if cached is None:
-        cached = {
-            name: shape
-            for name, field in config_cls.model_fields.items()
-            if (shape := _classify_child_field(field.annotation)) is not None
-        }
-        _CHILD_FIELDS[config_cls] = cached
+        cached = _CHILD_FIELDS[config_cls] = _classify_fields(config_cls)
     return cached
 
 
@@ -296,7 +333,7 @@ def _resolve_child(
     context: Any,
     errors: list[InitErrorDetails],
 ) -> Any:
-    if shape == "list" and isinstance(value, (list, tuple, set, frozenset)):
+    if shape == "list" and isinstance(value, (list, tuple)):
         return [_resolve_one(v, (*loc, i), context, errors) for i, v in enumerate(value)]
     if shape == "dict" and isinstance(value, Mapping):
         return {k: _resolve_one(v, (*loc, k), context, errors) for k, v in value.items()}
