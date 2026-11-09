@@ -1,0 +1,53 @@
+name: C++ headers and example
+
+# The Python test suite never compiles anything. This job covers the C++ side end to end, the way a
+# downstream user sees it: build the package (sdist, then a wheel from the sdist, which exercises
+# MANIFEST.in and setup.py's header copy), install the wheel (not editable), and compile and test
+# examples/bausatz against the headers the installed package ships via bausatz.get_include().
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Build wheel, compile example against it, run its tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Build sdist and wheel
+        run: |
+          pip install build
+          python -m build
+
+      - name: Install the wheel and the example's build/test dependencies
+        run: pip install dist/*.whl pybind11 setuptools pytest
+
+      - name: Check the headers are bundled into the installed package
+        # Run outside the checkout so `import bausatz` can only find the installed wheel.
+        working-directory: ${{ runner.temp }}
+        run: |
+          python - <<'EOF'
+          import os
+          import bausatz
+          inc = bausatz.get_include()
+          print("bausatz.get_include() ->", inc)
+          package_dir = os.path.dirname(os.path.abspath(bausatz.__file__))
+          assert inc.startswith(package_dir), "headers not bundled into the wheel"
+          for header in ("component.hpp", "pybind.hpp"):
+              assert os.path.isfile(os.path.join(inc, "bausatz", header)), header
+          EOF
+
+      - name: Compile the example against the installed headers
+        working-directory: examples/bausatz
+        run: python setup.py build_ext --inplace
+
+      - name: Run the example's tests
+        run: python -m pytest -v examples/bausatz/test_affine.py
