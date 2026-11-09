@@ -114,6 +114,12 @@ class ComponentFactory:
         Validates a whole nested structure in one pass, with Pydantic routing each
         node by `class_name`. Rebuilt only when the registry changes (keyed on its
         monotonic version, so a clear + re-register can't serve a stale adapter).
+
+        Nested child specs resolve against each Config's home factory (its family's
+        scoped factory, else the global one), so a scoped family needs no extra
+        arguments. A class registered here by hand whose home is a *different* factory
+        resolves its children there unless you pass ``context={"factory": self}``,
+        which is what ``validate()`` does.
         """
         version = self.registry.version
         if self._adapter_cache is not None and self._adapter_cache[0] == version:

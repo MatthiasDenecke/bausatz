@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Literal
 
 import pytest
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, ValidationInfo, model_validator
 
 from bausatz import Component, ComponentFactory, Registry
 from bausatz.registry import DuplicateTagError, UnknownTagError
@@ -563,13 +563,15 @@ def test_scoped_container_builds_children_from_its_own_factory():
         def _build_children(self, factory: ComponentFactory) -> None:
             self.child = factory.build(self.config.child)
 
-    # The child spec resolves during validation, so it needs the scoped factory in context (the
-    # global registry has never heard of 'scoped-leaf').
-    cfg = SBox.Config.model_validate(
-        {"class_name": "scoped-box", "child": {"class_name": "scoped-leaf"}},
-        context={"factory": lib},
-    )
+    # The child spec resolves during validation, against the scoped factory (the global registry has
+    # never heard of 'scoped-leaf'). It comes from the context when given, and otherwise from the
+    # family SBox.Config belongs to, so every way of validating the Config resolves the child.
+    spec = {"class_name": "scoped-box", "child": {"class_name": "scoped-leaf"}}
+    cfg = SBox.Config.model_validate(spec, context={"factory": lib})
     assert isinstance(cfg.child, SLeaf.Config)  # eagerly resolved to the concrete Config
+    assert isinstance(SBox.Config.model_validate(spec).child, SLeaf.Config)  # no context
+    assert isinstance(SBox.Config(child={"class_name": "scoped-leaf"}).child, SLeaf.Config)
+    assert isinstance(lib.config_adapter().validate_python(spec).child, SLeaf.Config)
 
     # Constructed DIRECTLY (not via the factory): ensure_built with no factory must fall back to the
     # family's scoped factory to BUILD the component.
@@ -578,6 +580,54 @@ def test_scoped_container_builds_children_from_its_own_factory():
     assert isinstance(box.child, SLeaf)
     assert "scoped-leaf" not in ComponentFactory.get().registry
 
+
+def test_child_specs_resolve_against_the_parents_factory_all_the_way_down():
+    # A whole tree resolves against one registry: the factory a Config falls back to is passed on
+    # to its descendants, so a grandchild resolves where the root did.
+    lib = ComponentFactory()
+
+    class TBase(Component, factory=lib):
+        class Config(Component.Config):
+            pass
+
+    class TLeaf(TBase):
+        class Config(TBase.Config):
+            class_name: Literal["tree-leaf"] = "tree-leaf"
+
+    class TNode(TBase):
+        class Config(TBase.Config):
+            class_name: Literal["tree-node"] = "tree-node"
+            kids: list[TBase.Config] = []
+
+    cfg = TNode.Config(kids=[{"class_name": "tree-node", "kids": [{"class_name": "tree-leaf"}]}])
+    assert isinstance(cfg.kids[0].kids[0], TLeaf.Config)
+
+
+def test_caller_context_is_passed_through_to_children():
+    # Extra keys in the caller's context reach the child validators, and the caller's own
+    # context object is not modified when the factory is filled in.
+    seen: list[object] = []
+
+    class Probe(Component):
+        class Config(Component.Config):
+            class_name: Literal["ctx-probe"] = "ctx-probe"
+
+            @model_validator(mode="after")
+            def _record(self, info: ValidationInfo) -> Probe.Config:
+                seen.append((info.context or {}).get("tenant"))
+                return self
+
+    class Holder(Component):
+        class Config(Component.Config):
+            class_name: Literal["ctx-holder"] = "ctx-holder"
+            child: Component.Config
+
+    context = {"tenant": "acme"}
+    Holder.Config.model_validate(
+        {"class_name": "ctx-holder", "child": {"class_name": "ctx-probe"}}, context=context
+    )
+    assert seen == ["acme"]
+    assert context == {"tenant": "acme"}  # no "factory" key leaked into the caller's dict
 
 # --------------------------------------------------------------------------- #
 # ensure_built: idempotency, exception-safety, cycle detection.               #

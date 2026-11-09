@@ -63,27 +63,36 @@ class Component:
 
         model_config = ConfigDict(extra="forbid")  # reject unknown keys; inherited by subclasses
 
+        # The Component class that declared this Config, recorded by ``Component.__init_subclass__``.
+        # Its factory (the family's scoped one, else the global) is where this Config's child specs
+        # resolve when the validation context names no factory. A scoped family therefore validates
+        # the same however it is entered: ``factory.validate``, ``factory.config_adapter()``, or
+        # constructing the Config directly.
+        _owner: ClassVar[type[Component] | None] = None
+
         @model_validator(mode="before")
         @classmethod
         def _resolve_children(cls, data: Any, info: ValidationInfo) -> Any:
             """Turn nested child specs into their concrete Configs, in the parent's validation pass.
 
-            A field whose declared type is a ``Component.Config`` (or subclass) — directly or inside
-            a ``list``/``dict`` — accepts a plain spec dict; here each such dict is looked up by its
-            ``class_name`` in the registry (from the validation context's factory, else the global
-            one) and replaced with the concrete Config. That is what lets ``factory.validate``
-            validate a whole tree in one pass and keeps the tree typed, with no dedicated
-            child-field type. An already-resolved Config, or a value that is not a spec, passes
-            through untouched."""
+            A field whose declared type is a ``Component.Config`` (or subclass), directly or inside
+            a ``list``/``dict``, accepts a plain spec dict. Here each such dict is looked up by its
+            ``class_name`` and replaced with the concrete Config. The lookup uses the validation
+            context's factory, else this Config's home factory (see ``_owner``), and that factory
+            is passed on so the whole tree resolves against one registry. That is what lets
+            ``factory.validate`` validate a whole tree in one pass and keeps the tree typed, with no
+            dedicated child-field type. An already-resolved Config, or a value that is not a spec,
+            passes through untouched."""
             if not isinstance(data, Mapping):
                 return data
             child_fields = _child_config_fields(cls)
             if not child_fields:
                 return data
+            context = _resolution_context(cls, info)
             patched = dict(data)
             for field_name, shape in child_fields.items():
                 if field_name in patched:
-                    patched[field_name] = _resolve_child(patched[field_name], shape, info)
+                    patched[field_name] = _resolve_child(patched[field_name], shape, context)
             return patched
 
     # Narrowed in subclasses (`config: Linear.Config`) purely for type checkers.
@@ -96,10 +105,13 @@ class Component:
     _factory: ClassVar[ComponentFactory | None] = None
 
     def __init_subclass__(cls, factory: ComponentFactory | None = None, **kwargs: Any) -> None:
-        from bausatz.component_factory import ComponentFactory
         super().__init_subclass__(**kwargs)
         if factory is not None:
             cls._factory = factory  # inherited by the subtree (a deeper subclass may re-scope)
+        if "_owner" not in vars(cls.Config):
+            # The first component to declare this Config owns it. A subclass that inherits its
+            # parent's Config leaves the parent as the owner.
+            cls.Config._owner = cls
         field = cls.Config.model_fields.get(cls.DISCRIMINATOR)
         if field is None:
             return  # no discriminator pinned -> abstract base, not registered
@@ -109,7 +121,16 @@ class Component:
                 f"{cls.__qualname__}.Config.{cls.DISCRIMINATOR} needs a default, e.g. "
                 f'{cls.DISCRIMINATOR}: Literal["{tag}"] = "{tag}"'
             )
-        (cls._factory or ComponentFactory.get()).register(field.default, cls)
+        cls._home_factory().register(field.default, cls)
+
+    @classmethod
+    def _home_factory(cls) -> ComponentFactory:
+        """The factory this class registers into: its family's scoped factory, else the global one.
+        It is also the fallback for building children (``ensure_built``) and for resolving child
+        specs (``Config._owner``) when no factory is given."""
+        from bausatz.component_factory import ComponentFactory
+
+        return cls._factory or ComponentFactory.get()
 
     def __init__(self, config: Component.Config) -> None:
         self.config = config
@@ -147,10 +168,8 @@ class Component:
                 f"cyclic component graph: building {type(self).__name__} re-entered its own "
                 f"ensure_built()"
             )
-        from bausatz.component_factory import ComponentFactory
-
         # Fallback order: the caller's factory, the class family's scoped factory, the global.
-        resolved = factory or type(self)._factory or ComponentFactory.get()
+        resolved = factory or type(self)._home_factory()
         self._building = True
         try:
             self._build_children(resolved)
@@ -217,26 +236,39 @@ def _child_config_fields(config_cls: type) -> dict[str, str]:
     return cached
 
 
-def _resolve_one(value: Any, info: ValidationInfo) -> Any:
+def _resolution_context(config_cls: type[Component.Config], info: ValidationInfo) -> Any:
+    """The validation context to resolve ``config_cls``'s child specs with. This is the caller's
+    context when it names a factory; otherwise it is a copy with ``factory`` set to the Config's
+    home factory. A copy keeps the caller's object, and any other keys in it, untouched."""
+    context = info.context
+    if context is not None and context.get("factory") is not None:
+        return context
+    owner = config_cls._owner
+    if owner is not None:
+        factory = owner._home_factory()
+    else:  # a Config no component declared: fall back to the global factory
+        from bausatz.component_factory import ComponentFactory
+
+        factory = ComponentFactory.get()
+    return {**(context or {}), "factory": factory}
+
+
+def _resolve_one(value: Any, context: Any) -> Any:
     """Resolve a single child spec dict into its concrete Config; pass anything else through."""
     if isinstance(value, Component.Config) or not isinstance(value, Mapping):
         return value
     if Component.DISCRIMINATOR not in value:
         return value  # let the field's own validation raise against the missing discriminator
-    from bausatz.component_factory import ComponentFactory
-
-    context = info.context or {}
-    factory = context.get("factory") or ComponentFactory.get()
-    klass = factory.registry.get(value[Component.DISCRIMINATOR])
+    klass = context["factory"].registry.get(value[Component.DISCRIMINATOR])
     # Thread the same context down so deeper descendants resolve against the same factory.
-    return klass.Config.model_validate(dict(value), context=info.context)
+    return klass.Config.model_validate(dict(value), context=context)
 
 
-def _resolve_child(value: Any, shape: str, info: ValidationInfo) -> Any:
+def _resolve_child(value: Any, shape: str, context: Any) -> Any:
     if shape == "list" and isinstance(value, (list, tuple, set, frozenset)):
-        return [_resolve_one(v, info) for v in value]
+        return [_resolve_one(v, context) for v in value]
     if shape == "dict" and isinstance(value, Mapping):
-        return {k: _resolve_one(v, info) for k, v in value.items()}
+        return {k: _resolve_one(v, context) for k, v in value.items()}
     if shape == "one":
-        return _resolve_one(value, info)
+        return _resolve_one(value, context)
     return value  # wrong container type for the shape: let field validation report it
